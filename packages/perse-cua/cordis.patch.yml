@@ -1,0 +1,14 @@
+# Bundle layer contributed by perse-cua.
+#
+# Applied when the package is listed in a profile's `package.json` under
+# `dsh.profile.bundles`. A profile may equivalently insert the same row from its
+# own cordis.patch.yml; do ONE of the two, never both — the loader id must be
+# unique (preflight rule R-07).
+#
+# This row REPLACES a plain `@deepseek-ai/dsh-mcp-client` row for cua-driver:
+# it owns the MCP stdio connection itself so it can curate the tool surface and
+# project results. Do not run both against the same driver.
+- insert:
+    - id: perse-cua
+      name: perse-cua
+      description: cua-driver desktop automation — curated tool surface, condensed schemas, menu-free accessibility trees

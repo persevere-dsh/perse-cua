@@ -1,0 +1,23 @@
+{
+  "name": "perse-cua-workspace",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Build workspace for perse-cua — an out-of-tree DSH plugin of Persevere with DSH. The installable package lives in packages/perse-cua.",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "typecheck": "tsc -b tsconfig.host.json",
+    "build": "npm run typecheck && npm run bundle",
+    "bundle": "tsdown",
+    "pack": "npm run build && npm pack --workspace perse-cua",
+    "test": "npm run build && node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@types/node": "^24.0.0",
+    "tsdown": "^0.22.2",
+    "typescript": "6.0.3"
+  }
+}

@@ -1,0 +1,24 @@
+name: ci
+
+# Self-owned CI: no workflow, script, or config is inherited from the collection
+# index repository. A plain clone must build and test with no sibling checkouts.
+#
+# There is no `codegen` step: perse-cua exposes no Cordis service and no @Remote
+# method, so the Typert generator discovers no face for it. See README.md.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run bundle
+      - run: node --test test/*.test.mjs
