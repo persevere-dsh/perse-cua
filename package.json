@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Build workspace for perse-cua — an out-of-tree DSH plugin of Persevere with DSH. The installable package lives in packages/perse-cua.",
+  "description": "Build workspace for perse-cua \u2014 an out-of-tree DSH plugin of Persevere with DSH. The installable package lives in packages/perse-cua.",
   "workspaces": [
     "packages/*"
   ],

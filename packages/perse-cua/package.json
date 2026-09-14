@@ -1,6 +1,6 @@
 {
   "name": "perse-cua",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "perse-cua: front cua-driver's desktop-automation tools without their schema weight, for Persevere with DSH (perse = persevere)",
   "type": "module",

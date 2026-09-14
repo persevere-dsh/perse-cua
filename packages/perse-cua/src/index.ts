@@ -23,7 +23,7 @@
  * @module perse-cua
  */
 
-import { curateTools, DEFAULT_ALLOW, DEFAULT_DENY } from './curate.ts'
+import { curateTools, DEFAULT_DENY } from './curate.ts'
 import { McpStdioClient, McpTransportError, type McpCallResult, type McpContentBlock, type McpTool } from './mcp.ts'
 import { condenseDescription, trimAxMenuTree } from './trim.ts'
 
@@ -42,9 +42,12 @@ export interface Config {
   env?: Record<string, string>
   /** Server row name; sets the `mcp__<serverName>__<tool>` namespace. */
   serverName?: string
-  /** Bare tool names to keep. Defaults to {@link DEFAULT_ALLOW}. */
+  /**
+   * Bare tool names to keep. Omit to keep every advertised tool except `deny`.
+   * Pass `MINIMAL_ALLOW` for the token-tight desktop-only cut.
+   */
   allow?: string[]
-  /** Bare tool names to drop; wins over `allow`. */
+  /** Bare tool names to drop; wins over `allow`. Defaults to `WASTE_ONLY_TOOLS`. */
   deny?: string[]
   /** Condense descriptions to their first sentence. Default `true`. */
   condenseDescriptions?: boolean
@@ -109,7 +112,7 @@ export function apply(ctx: { tools: { register: (definition: unknown) => () => v
   const boot = async (): Promise<void> => {
     await client.start()
     const advertised = await client.listTools()
-    const curation = curateTools(advertised.map(tool => tool.name), config.allow ?? DEFAULT_ALLOW, config.deny ?? DEFAULT_DENY)
+    const curation = curateTools(advertised.map(tool => tool.name), config.allow, config.deny ?? DEFAULT_DENY)
     const byName = new Map(advertised.map(tool => [tool.name, tool]))
 
     let before = 0
@@ -262,6 +265,6 @@ async function admitImage(
   }
 }
 
-export { curateTools, bareToolName, DEFAULT_ALLOW, DEFAULT_DENY } from './curate.ts'
+export { curateTools, bareToolName, DEFAULT_ALLOW, DEFAULT_DENY, MINIMAL_ALLOW, WASTE_ONLY_TOOLS } from './curate.ts'
 export { trimAxMenuTree, condenseDescription } from './trim.ts'
 export type { McpTool } from './mcp.ts'

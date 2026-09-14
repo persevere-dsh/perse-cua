@@ -1,25 +1,59 @@
 /**
  * Which cua-driver tools this plugin puts in front of the model.
  *
- * cua-driver advertises 56 tools. Every one of them is a tool definition in each
- * model request whether or not the task touches it, and on 0.28.1 they measured
- * 93 KB of model-facing schema (name + description + inputSchema) per request.
- * The default here keeps the desktop-automation loop and drops the surfaces a
- * coding session does not need: browser CDP tooling, trajectory recording,
- * cursor cosmetics, session lifecycle, and the self-update probe.
+ * Design rule, learned the hard way: **default to capability-complete and subtract
+ * only proven waste.** An earlier revision curated against a hand-written list of
+ * "the desktop-automation loop", which measured better but silently removed whole
+ * capabilities — web automation, trajectory replay, session lifecycle, the real
+ * pointer — so most of the schema saving it produced was capability removal rather
+ * than waste removal. See README.md for the arithmetic.
  *
- * `allow` is a starting point, not a ceiling: a caller widens it from config, and
- * `deny` always wins. Names are matched with or without the `mcp__<server>__`
- * namespace so the same list works for a renamed server row.
+ * So the default here denies nothing but {@link WASTE_ONLY_TOOLS} and keeps every
+ * advertised tool otherwise. {@link MINIMAL_ALLOW} remains available for a
+ * token-tight profile that knowingly gives those capabilities up.
+ *
+ * Names are matched with or without the `mcp__<server>__` namespace so the same
+ * policy works for a renamed server row.
  *
  * @module perse-cua/curate
  */
 
 /**
- * Tools kept by default: discover a target, observe it, act on it, verify it,
- * plus the few read-only probes needed to diagnose a stuck loop.
+ * Tools that cannot change a task outcome, so denying them costs nothing:
+ *
+ * - four `*_agent_cursor_*` tools paint overlay artwork;
+ * - `check_for_update` duplicates the `cua-driver check-update` CLI;
+ * - `escalate_session` and `get_session_state` are deprecated compatibility shims
+ *   (the driver's own descriptions say so).
  */
-export const DEFAULT_ALLOW: readonly string[] = [
+export const WASTE_ONLY_TOOLS: readonly string[] = [
+  'set_agent_cursor_enabled',
+  'set_agent_cursor_motion',
+  'set_agent_cursor_theme',
+  'get_agent_cursor_state',
+  'check_for_update',
+  'escalate_session',
+  'get_session_state',
+]
+
+/**
+ * Default deny list. Kept tiny on purpose: everything in it must be provably
+ * incapable of affecting a task.
+ */
+export const DEFAULT_DENY: readonly string[] = WASTE_ONLY_TOOLS
+
+/** Default allow list: absent, meaning "keep every tool the driver advertises". */
+export const DEFAULT_ALLOW: readonly string[] | undefined = undefined
+
+/**
+ * The aggressive cut: desktop automation only, giving up web automation,
+ * trajectory replay, session lifecycle, recording, and the real pointer.
+ *
+ * Prefer this only when request size matters more than reach, and prefer extending
+ * it over trimming it — an allow list is a capability ceiling, and a tool missing
+ * from it is invisible to the model rather than merely unused.
+ */
+export const MINIMAL_ALLOW: readonly string[] = [
   // discover + launch
   'list_apps',
   'list_windows',
@@ -54,14 +88,11 @@ export const DEFAULT_ALLOW: readonly string[] = [
   'get_config',
 ]
 
-/** Names dropped even when an `allow` entry would otherwise keep them. */
-export const DEFAULT_DENY: readonly string[] = []
-
 /** One tool's admission decision. */
 export interface ToolDecision {
   readonly name: string
   readonly keep: boolean
-  readonly reason: 'allowed' | 'not-in-allow' | 'denied'
+  readonly reason: 'allowed' | 'not-in-allow' | 'denied' | 'kept-by-default'
 }
 
 /** Outcome of applying an allow/deny policy to an advertised tool list. */
@@ -87,32 +118,37 @@ export function bareToolName(name: string, serverName?: string): string {
  * Apply one allow/deny policy to the names a server actually advertised.
  *
  * @param advertised - tool names exactly as the harness sees them.
- * @param allow - names to keep, bare or namespaced.
+ * @param allow - names to keep, bare or namespaced; `undefined` keeps everything
+ *   except what `deny` removes.
  * @param deny - names to drop; takes precedence over `allow`.
  * @param serverName - optional server row name, used to match namespaced entries.
  * @returns per-tool decisions plus the resulting keep/drop sets.
  */
 export function curateTools(
   advertised: readonly string[],
-  allow: readonly string[] = DEFAULT_ALLOW,
+  allow: readonly string[] | undefined = DEFAULT_ALLOW,
   deny: readonly string[] = DEFAULT_DENY,
   serverName?: string,
 ): CurationResult {
-  const allowSet = new Set(allow.map(name => bareToolName(name, serverName)))
+  const allowSet = allow === undefined ? undefined : new Set(allow.map(name => bareToolName(name, serverName)))
   const denySet = new Set(deny.map(name => bareToolName(name, serverName)))
   const decisions: ToolDecision[] = []
   const matched = new Set<string>()
 
   for (const name of advertised) {
     const bare = bareToolName(name, serverName)
-    let reason: ToolDecision['reason'] = 'not-in-allow'
+    let reason: ToolDecision['reason']
     if (denySet.has(bare)) reason = 'denied'
+    else if (allowSet === undefined) reason = 'kept-by-default'
     else if (allowSet.has(bare)) reason = 'allowed'
-    if (reason !== 'not-in-allow') matched.add(bare)
-    decisions.push({ name, keep: reason === 'allowed', reason })
+    else reason = 'not-in-allow'
+    if (reason === 'denied' || reason === 'allowed') matched.add(bare)
+    decisions.push({ name, keep: reason !== 'denied' && reason !== 'not-in-allow', reason })
   }
 
-  const unmatched = [...allowSet].filter(name => !matched.has(name) && !denySet.has(name))
+  const unmatched = allowSet === undefined
+    ? []
+    : [...allowSet].filter(name => !matched.has(name) && !denySet.has(name))
   return {
     decisions,
     keep: decisions.filter(decision => decision.keep).map(decision => decision.name),

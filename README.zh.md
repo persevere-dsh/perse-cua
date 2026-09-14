@@ -21,7 +21,7 @@ cua-driver 0.28.1 对外声明 **56 个工具**。不管这一轮任务碰不碰
 | | 工具数 | 模型可见 schema | ≈ 每请求 token |
 | --- | --- | --- | --- |
 | 裸用 `@deepseek-ai/dsh-mcp-client` | 56 | 95.1 KB | ~24,300 |
-| 经过 `perse-cua` | 27 | 39.7 KB | ~10,200 |
+| 经过 `perse-cua`（默认） | 49 | 60.0 KB | ~15,400（**−37%**） |
 
 而当任务真的在操作 app 时，原始窗口快照里绝大部分是菜单栏：在一个 230×408 的计算器窗口上，
 菜单子树占 146 个元素中的 145 个、占渲染字节的 **88%**。它永远不可能是操作目标 —— 菜单项要用
@@ -29,16 +29,42 @@ cua-driver 0.28.1 对外声明 **56 个工具**。不管这一轮任务碰不碰
 
 ## 它做什么
 
-1. **裁剪工具面。** 只保留桌面自动化闭环 —— 发现、观察、动作、校验、剪贴板、诊断 —— 去掉浏览器
-   CDP 工具、轨迹录制、光标外观、会话生命周期、自更新探测。可以用配置放宽。
-2. **压缩描述**到首句。完整操作手册并没有丢：它本来就以 `cua-driver` 技能的形式随包发布，
-   模型需要时按需加载。参数 schema 原样透传，所以每个工具仍然正常校验。
+1. **把描述压缩到首句** —— 默认省下来的部分主要来自这里。完整操作手册并没有丢：它本来就以
+   `cua-driver` 技能的形式随包发布，模型需要时按需加载。参数 schema 原样透传，所以每个工具
+   仍然正常校验。
+2. **只拒绝能证明是废料的工具。** 默认 `deny` 是 7 个不可能改变任务结果的工具：4 个
+   `*_agent_cursor_*` 浮层外观工具、`check_for_update` 探测，以及两个已废弃的兼容 shim
+   （`escalate_session`、`get_session_state`）。驱动声明的其余工具全部到达模型。
 3. **剥掉 AX 菜单栏子树**，窗口块保持逐字节不变 —— 包括原有的元素编号，因为 `element_token`
    必须继续对得上驱动缓存的那份快照。
 
+### 为什么默认这么保守
+
+早先一版按手写的"桌面自动化闭环"白名单裁剪，报告了 58% 的节省。那多出来的 21 个点里
+**大部分是砍能力，不是去废料** —— 它删掉了网页自动化、轨迹回放、会话生命周期和真实指针，
+却把总数当作效率成果汇报。按正确的拆分实测：
+
+| 策略 | 工具数 | schema | ≈ token | 能力 |
+| --- | --- | --- | --- | --- |
+| 只压缩描述 | 56 | 62.7 KB | ~16,000 | 完整 |
+| **默认：压缩 + 去废料** | **49** | **60.0 KB** | **~15,400** | **完整** |
+| 压缩 + `MINIMAL_ALLOW` | 27 | 39.7 KB | ~10,200 | 仅桌面 |
+
+"只压缩描述"那一行才是真正免费的诚实上限。白名单是**能力上限**：不在名单里的工具对模型是
+**不可见**，而不只是未被使用 —— 模型要不到它看不见的东西。
+
+如果请求体积比覆盖面更重要，显式选择激进裁剪：
+
+```yaml
+- id: perse-cua
+  config:
+    allow: !!js (await import('perse-cua')).MINIMAL_ALLOW
+```
+
 ## 使用
 
-在 profile 的 `cordis.patch.yml` 里加一行 id 定向的 config 覆盖：
+`perse-cua` 自带 `dsh.bundle.patch`，所以装上它就已经注册了 loader 行。你只需要加一条
+**config 覆盖** —— 不要写第二条 `insert`，那会撞 loader id 唯一性规则（R-07）：
 
 ```yaml
 - id: perse-cua
@@ -54,9 +80,6 @@ npm pack --workspace perse-cua
 dsh plugin --profile web add ./perse-cua-0.1.0.tgz
 ```
 
-> 插件自带 `dsh.bundle.patch`，安装后已作为 bundle 层注册了同 id 的插入行。
-> 因此 profile 里只能写 config 覆盖，**不能再写一条 `insert`**，否则会撞 loader id 唯一性规则（R-07）。
-
 ### 配置项
 
 | 字段 | 默认 | 含义 |
@@ -65,8 +88,8 @@ dsh plugin --profile web add ./perse-cua-0.1.0.tgz
 | `args` | `["mcp"]` | 传给驱动的参数 |
 | `env` | — | 子进程额外环境变量 |
 | `serverName` | `cua` | 命名空间；工具名为 `mcp__<serverName>__<tool>` |
-| `allow` | 见 `DEFAULT_ALLOW` | 要保留的裸工具名 |
-| `deny` | `[]` | 要去掉的裸工具名；优先于 `allow` |
+| `allow` | 省略 | 要保留的裸工具名。省略 = 保留驱动声明的全部（减去 `deny`）。传 `MINIMAL_ALLOW` 走仅桌面的紧裁剪 |
+| `deny` | `WASTE_ONLY_TOOLS` | 要去掉的裸工具名；优先于 `allow` |
 | `condenseDescriptions` | `true` | 描述压到首句 |
 | `trimMenuTrees` | `true` | 从渲染结果里移除 `AXMenu*` 子树 |
 | `requestTimeoutMs` | `120000` | 单次调用超时 |
@@ -81,7 +104,6 @@ dsh plugin --profile web add ./perse-cua-0.1.0.tgz
   不暴露 `@Remote` 方法，所以 Typert 生成器为它发现不了任何 face，直接以 `discovered: []` 结束。
   manifest 因此不声明 `./typert` / `./remote`，而不是挂一个指向空文件的导出。
   维护者 profile 里那个能正常工作的宿主侧插件 `dsh-zai-search-tools` 是同样的形态。
-- **不带浏览器 CDP 工具。** `browser_*` 和旧的 `page` 默认被裁掉；需要时用 `allow` 加回来。
 - **不自动重连。** 驱动进程死掉会表现为调用失败，并且在 harness 重载插件前一直失败。
   cua-driver 是本地进程，静默重拉被判定为比明确报错更糟。
 
@@ -90,7 +112,8 @@ dsh plugin --profile web add ./perse-cua-0.1.0.tgz
 - macOS 需要 Accessibility **和** Screen Recording。跑一次 `cua-driver permissions grant`：
   驱动会通过 LaunchServices 拉起 `CuaDriver.app`，让 TCC 授权挂在 `com.trycua.driver` 上，
   而不是挂在 harness 进程上。
-- 动作默认在后台执行，不抢用户焦点。
+- 动作默认在后台执行，不抢用户焦点。`move_cursor` 在默认的 window 作用域下**只移动 agent 浮层光标**；
+  要移动真实系统指针得用 `scope: "desktop"`，那是一次前台接管。
 - 驱动解析不到窗口的无障碍表面时，会返回**空树 + `degraded_reason: ax_window_unresolved`**，
   而不是把错误表面的树交出来。看到这个就重新拉起 app 再快照一次。
 
