@@ -1,5 +1,7 @@
 # perse-cua
 
+[![ci](https://github.com/persevere-dsh/perse-cua/actions/workflows/ci.yml/badge.svg)](https://github.com/persevere-dsh/perse-cua/actions/workflows/ci.yml)
+
 English | [中文](README.zh.md)
 
 `perse` = persevere
