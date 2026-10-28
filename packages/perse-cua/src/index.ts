@@ -26,6 +26,11 @@
  * @module perse-cua
  */
 
+import { execFile } from 'node:child_process'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { curateTools, BASE_WASTE_TOOLS, CURSOR_EXPERIENCE_TOOLS, MINIMAL_ALLOW, minimalAllowWithCursor } from './curate.ts'
 import { McpStdioClient, McpTransportError, type McpCallResult, type McpContentBlock, type McpTool } from './mcp.ts'
 import { condenseDescription, trimAxMenuTree } from './trim.ts'
@@ -78,6 +83,22 @@ export interface Config {
    * shared daemon stays bound to its old lease and can reject revival.
    */
   bestExperienceSession?: string
+  /**
+   * Menu-bar session indicator (macOS only; follows `bestExperience` when
+   * omitted). A tiny LSUIElement app shipped in `bin/` shows an "assistive
+   * session" status item while this transport is live, brightening while
+   * non-read-only tools run — the Codex-style visible marker.
+   */
+  indicator?: boolean
+  /** State file the indicator polls; defaults to ~/Library/Application Support/perse-cua/indicator.json. */
+  indicatorStateFile?: string
+  /**
+   * Driving view (follows `bestExperience` when omitted): while tools drive a
+   * window, upserts an in-app panel (DSH's `panels` service) showing that
+   * window's live thumbnail plus an action caption — draggable by the user,
+   * auto-removed when driving goes idle. No-op when the host lacks panels.
+   */
+  drivingPanel?: boolean
   /** Per-call timeout for driver tool calls, milliseconds. */
   requestTimeoutMs?: number
   /** Time budget for spawning the driver and completing the handshake. */
@@ -202,6 +223,128 @@ export function apply(ctx: { tools: { register: (definition: unknown) => () => v
     }
   }
 
+  /**
+   * Menu-bar session indicator (macOS only). The helper app must be launched via
+   * `open` — LaunchServices-registered apps are the only ones whose NSStatusItem
+   * renders — so state flows through a small JSON file the helper polls, with
+   * TTL decay and self-cleanup on file removal. Everything is best-effort: a
+   * missing helper degrades to "no indicator", never to a broken boot.
+   */
+  const indicatorEnabled = config.indicator ?? bestExperience
+  const stateFile = config.indicatorStateFile
+    ?? path.join(homedir(), 'Library', 'Application Support', 'perse-cua', 'indicator.json')
+  let indicatorLaunched = false
+  let indicatorTimer: ReturnType<typeof setTimeout> | undefined
+  let lastStateWrite = 0
+  let lastStateActive = false
+  const writeIndicatorState = (active: boolean): void => {
+    try {
+      writeFileSync(stateFile, JSON.stringify({ session: cursorSession ?? 'perse-cua', active, ts: Date.now() / 1000 }))
+      lastStateWrite = Date.now()
+      lastStateActive = active
+    } catch {
+      // The indicator is cosmetic; never fail a call over it.
+    }
+  }
+  const launchIndicator = (): void => {
+    if (!indicatorEnabled || indicatorLaunched || process.platform !== 'darwin') return
+    indicatorLaunched = true
+    try {
+      mkdirSync(path.dirname(stateFile), { recursive: true })
+    } catch {
+      // fall through; the state write reports real trouble
+    }
+    writeIndicatorState(false)
+    const app = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'PerseCuaIndicator.app')
+    execFile('open', ['-g', app, '--args', stateFile], () => {
+      // Non-zero exit (missing bundle) just means no indicator.
+    })
+  }
+  const noteIndicatorActivity = (rawName: string): void => {
+    if (!indicatorLaunched || READ_ONLY_TOOLS.has(rawName)) return
+    // Always claim the first action after idle; throttle only consecutive actives.
+    if (!lastStateActive || Date.now() - lastStateWrite > 1000) writeIndicatorState(true)
+    if (indicatorTimer !== undefined) clearTimeout(indicatorTimer)
+    indicatorTimer = setTimeout(() => {
+      indicatorTimer = undefined
+      writeIndicatorState(false)
+    }, 2500)
+  }
+  const closeIndicator = (): void => {
+    if (indicatorTimer !== undefined) {
+      clearTimeout(indicatorTimer)
+      indicatorTimer = undefined
+    }
+    if (!indicatorLaunched) return
+    try {
+      rmSync(stateFile) // the helper polls itself out of existence
+    } catch {
+      // already gone
+    }
+  }
+
+  /**
+   * Driving view: an in-app panel (contributed through the host's `panels`
+   * service, DSH >= ui-panels) showing the driven window's thumbnail plus the
+   * latest action caption — the Codex-style "what is the agent doing" surface,
+   * but in-app, draggable, and per-window instead of full-screen. Optional by
+   * design: hosts without the service keep working untouched.
+   */
+  interface PanelsService {
+    upsert(id: string, patch: { title?: string; caption?: string; image?: string; meta?: Record<string, string> }): void
+    remove(id: string): void
+  }
+  const drivingPanelEnabled = config.drivingPanel ?? bestExperience
+  const panelsService: PanelsService | undefined = (() => {
+    if (!drivingPanelEnabled) return undefined
+    try {
+      const got: unknown = ctx.get('panels')
+      if (got !== null && typeof got === 'object' && 'upsert' in got && 'remove' in got) return got as PanelsService
+    } catch {
+      // host without a panels service: no driving view, everything else works
+    }
+    return undefined
+  })()
+  const PANEL_ID = 'perse-cua/driving'
+  let panelShotAt = 0
+  let panelIdleTimer: ReturnType<typeof setTimeout> | undefined
+  const updateDrivingPanel = async (rawName: string, callArgs: Record<string, unknown>): Promise<void> => {
+    const panels = panelsService
+    if (panels === undefined) return
+    if (panelIdleTimer !== undefined) clearTimeout(panelIdleTimer)
+    panelIdleTimer = setTimeout(() => {
+      panelIdleTimer = undefined
+      panels.remove(PANEL_ID)
+    }, 8000)
+    const pid = typeof callArgs.pid === 'number' ? callArgs.pid : undefined
+    const windowId = typeof callArgs.window_id === 'number' ? callArgs.window_id : undefined
+    const target = pid === undefined ? rawName : windowId === undefined ? `${rawName} (pid ${String(pid)})` : `${rawName} (pid ${String(pid)}, window ${String(windowId)})`
+    const now = Date.now()
+    if (pid === undefined || windowId === undefined || now - panelShotAt < 1000) {
+      panels.upsert(PANEL_ID, { title: 'Computer use', caption: target })
+      return
+    }
+    panelShotAt = now
+    try {
+      const shot = await client.callTool('get_window_state', { pid, window_id: windowId, include_screenshot: true, max_dimension: 320 })
+      const image = shot.content.find(block => block.type === 'image')
+      panels.upsert(PANEL_ID, {
+        title: 'Computer use',
+        caption: target,
+        ...(image?.data === undefined ? {} : { image: `data:${image.mimeType ?? 'image/png'};base64,${image.data}` }),
+      })
+    } catch {
+      panels.upsert(PANEL_ID, { title: 'Computer use', caption: target })
+    }
+  }
+  const closeDrivingPanel = (): void => {
+    if (panelIdleTimer !== undefined) {
+      clearTimeout(panelIdleTimer)
+      panelIdleTimer = undefined
+    }
+    panelsService?.remove(PANEL_ID)
+  }
+
   const boot = async (): Promise<void> => {
     await client.start()
     const advertised = await client.listTools()
@@ -220,7 +363,8 @@ export function apply(ctx: { tools: { register: (definition: unknown) => () => v
       after += afterBytes
       if (afterBytes < definitionBytes(tool, false)) trimmed += 1
       disposers.push(registerTool(ctx, client, tool, prefix, condense, trimTrees,
-        bestExperience ? () => cursorSession : undefined))
+        bestExperience ? () => cursorSession : undefined, (name: string) => noteIndicatorActivity(name),
+        (name: string, args: Record<string, unknown>) => { void updateDrivingPanel(name, args) }))
     }
 
     started = true
@@ -235,6 +379,7 @@ export function apply(ctx: { tools: { register: (definition: unknown) => () => v
     if (byName.size === 0) console.log('[perse-cua] cua-driver advertised no tools')
 
     if (bestExperience) await enableBestExperienceCursor()
+    launchIndicator()
   }
 
   boot().catch((error: unknown) => {
@@ -256,6 +401,8 @@ export function apply(ctx: { tools: { register: (definition: unknown) => () => v
         // Best-effort cleanup; closing the transport ends the lease anyway.
       })
     }
+    closeIndicator()
+    closeDrivingPanel()
     client.close()
   }
 }
@@ -281,6 +428,8 @@ function registerTool(
   condense: boolean,
   trimTrees: boolean,
   cursorFor?: () => string | undefined,
+  onCall?: (rawName: string) => void,
+  onExecuted?: (rawName: string, callArgs: Record<string, unknown>) => void,
 ): () => void {
   const rawName = tool.name
   const truncated = condense ? condenseDescription(tool.description ?? '', DESCRIPTION_BUDGET) : (tool.description ?? '')
@@ -299,6 +448,7 @@ function registerTool(
     },
     isConcurrencySafe: () => READ_ONLY_TOOLS.has(rawName),
     async execute(args: unknown): Promise<{ blocks: RenderBlock[] }> {
+      onCall?.(rawName)
       let callArgs: Record<string, unknown> = args !== null && typeof args === 'object' ? (args as Record<string, unknown>) : {}
       // Best experience: unlabeled calls would act through the implicit lease, whose
       // cursor nobody enabled. Route them through the cursor session so the overlay
@@ -307,6 +457,7 @@ function registerTool(
         callArgs = { session: cursorFor(), ...callArgs }
       }
       const result = await client.callTool(rawName, callArgs)
+      if (!READ_ONLY_TOOLS.has(rawName)) onExecuted?.(rawName, callArgs)
       const blocks = await project(ctx, result, trimTrees)
       if (result.isError === true) {
         const text = blocks.filter((block): block is { type: 'text'; text: string } => block.type === 'text').map(block => block.text).join('\n')
