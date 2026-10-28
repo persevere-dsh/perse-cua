@@ -97,6 +97,8 @@ dsh plugin --profile web add ./perse-cua-0.1.0.tgz
 | `deny` | 3 个 shim | 要去掉的裸工具名；优先于 `allow`。`bestExperience: false` 时把 4 个光标工具加回拒绝集 |
 | `bestExperience` | `true` | 保留 agent 光标工具，并在启动时显示可见光标（默认用传输层隐式会话；不可用时回退为唯一命名会话） |
 | `bestExperienceSession` | `perse-cua` | 持有最佳体验光标的驱动会话标签 |
+| `indicator` | 跟随 `bestExperience` | 显示 macOS 菜单栏指示器；设为 `false` 可关闭 |
+| `indicatorStateFile` | `~/Library/Application Support/perse-cua/indicator.json` | 与指示器辅助进程共享的状态文件 |
 | `condenseDescriptions` | `true` | 描述压到首句 |
 | `trimMenuTrees` | `true` | 从渲染结果里移除 `AXMenu*` 子树 |
 | `requestTimeoutMs` | `120000` | 单次调用超时 |
@@ -121,6 +123,10 @@ dsh plugin --profile web add ./perse-cua-0.1.0.tgz
   而不是挂在 harness 进程上。
 - 动作默认在后台执行，不抢用户焦点。`move_cursor` 在默认的 window 作用域下**只移动 agent 浮层光标**；
   要移动真实系统指针得用 `scope: "desktop"`，那是一次前台接管。
+- 菜单栏指示器随插件启动，连续 60 秒没有状态更新后退出。下一次非只读工具调用会重新启动它，
+  选择 **Hide indicator** 或启动失败后也会如此；只读调用不会重启指示器。同一插件实例的并发调用
+  共享一次待完成的启动。卸载插件会移除状态文件并结束启动等待进程，辅助进程观察到文件移除后退出，
+  启动宽限期内最多等待 10 秒。指示器失败不会阻止驱动工具调用。
 - 驱动解析不到窗口的无障碍表面时，会返回**空树 + `degraded_reason: ax_window_unresolved`**，
   而不是把错误表面的树交出来。看到这个就重新拉起 app 再快照一次。
 
@@ -132,6 +138,10 @@ npm run typecheck
 npm run build      # tsc -> lib/types，然后 tsdown -> lib/index.js
 npm test           # build + node --test test/*.test.mjs
 ```
+
+指示器生命周期测试运行构建后的插件，并用真实子进程替代驱动和 LaunchServices 等待进程，
+覆盖退出、重试、并发调用与卸载，不启动 GUI。状态栏图标显示、空闲后恢复以及移除效果，
+仍需在 macOS 上使用打包的辅助程序单独验证。
 
 ## 许可
 

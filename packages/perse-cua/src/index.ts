@@ -26,7 +26,7 @@
  * @module perse-cua
  */
 
-import { execFile } from 'node:child_process'
+import { execFile, type ChildProcess } from 'node:child_process'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
@@ -86,8 +86,9 @@ export interface Config {
   /**
    * Menu-bar session indicator (macOS only; follows `bestExperience` when
    * omitted). A tiny LSUIElement app shipped in `bin/` shows an "assistive
-   * session" status item while this transport is live, brightening while
-   * non-read-only tools run — the Codex-style visible marker.
+   * session" status item at boot, brightening while non-read-only tools run.
+   * After the helper exits (including its idle timeout), the next non-read-only
+   * call restarts it. Startup failure never blocks a driver tool call.
    */
   indicator?: boolean
   /** State file the indicator polls; defaults to ~/Library/Application Support/perse-cua/indicator.json. */
@@ -234,12 +235,17 @@ export function apply(ctx: { tools: { register: (definition: unknown) => () => v
   const stateFile = config.indicatorStateFile
     ?? path.join(homedir(), 'Library', 'Application Support', 'perse-cua', 'indicator.json')
   let indicatorLaunched = false
+  let indicatorClosed = false
+  let indicatorProcess: ChildProcess | undefined
+  let indicatorStateWritten = false
   let indicatorTimer: ReturnType<typeof setTimeout> | undefined
   let lastStateWrite = 0
   let lastStateActive = false
   const writeIndicatorState = (active: boolean): void => {
+    if (indicatorClosed) return
     try {
       writeFileSync(stateFile, JSON.stringify({ session: cursorSession ?? 'perse-cua', active, ts: Date.now() / 1000 }))
+      indicatorStateWritten = true
       lastStateWrite = Date.now()
       lastStateActive = active
     } catch {
@@ -247,7 +253,7 @@ export function apply(ctx: { tools: { register: (definition: unknown) => () => v
     }
   }
   const launchIndicator = (): void => {
-    if (!indicatorEnabled || indicatorLaunched || process.platform !== 'darwin') return
+    if (!indicatorEnabled || indicatorClosed || indicatorLaunched || process.platform !== 'darwin') return
     indicatorLaunched = true
     try {
       mkdirSync(path.dirname(stateFile), { recursive: true })
@@ -256,12 +262,23 @@ export function apply(ctx: { tools: { register: (definition: unknown) => () => v
     }
     writeIndicatorState(false)
     const app = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'PerseCuaIndicator.app')
-    execFile('open', ['-g', app, '--args', stateFile], () => {
-      // Non-zero exit (missing bundle) just means no indicator.
-    })
+    try {
+      // Wait for the app itself to exit, including its idle timeout. An ordinary
+      // `open` exits as soon as the launch is accepted and cannot track liveness.
+      const launcher = execFile('open', ['-g', '-W', app, '--args', stateFile], () => {
+        if (indicatorProcess !== launcher) return
+        indicatorProcess = undefined
+        indicatorLaunched = false // a later action can retry an exit or failure
+      })
+      indicatorProcess = launcher
+    } catch {
+      indicatorLaunched = false
+    }
   }
   const noteIndicatorActivity = (rawName: string): void => {
-    if (!indicatorLaunched || READ_ONLY_TOOLS.has(rawName)) return
+    if (indicatorClosed || READ_ONLY_TOOLS.has(rawName)) return
+    launchIndicator()
+    if (!indicatorLaunched) return
     // Always claim the first action after idle; throttle only consecutive actives.
     if (!lastStateActive || Date.now() - lastStateWrite > 1000) writeIndicatorState(true)
     if (indicatorTimer !== undefined) clearTimeout(indicatorTimer)
@@ -271,16 +288,24 @@ export function apply(ctx: { tools: { register: (definition: unknown) => () => v
     }, 2500)
   }
   const closeIndicator = (): void => {
+    indicatorClosed = true
     if (indicatorTimer !== undefined) {
       clearTimeout(indicatorTimer)
       indicatorTimer = undefined
     }
-    if (!indicatorLaunched) return
-    try {
-      rmSync(stateFile) // the helper polls itself out of existence
-    } catch {
-      // already gone
+    if (indicatorStateWritten) {
+      try {
+        rmSync(stateFile) // the helper polls itself out of existence
+      } catch {
+        // already gone
+      }
     }
+    // The helper observes the missing file independently of the open waiter.
+    // Reap the waiter now so disposal does not keep the host process alive.
+    const launcher = indicatorProcess
+    indicatorProcess = undefined
+    indicatorLaunched = false
+    launcher?.kill()
   }
 
   /**

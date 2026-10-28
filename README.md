@@ -110,6 +110,8 @@ dsh plugin --profile web add ./perse-cua-0.1.0.tgz
 | `deny` | 3 shims | Bare tool names to drop; wins over `allow`. `bestExperience: false` restores the four cursor tools to the deny set |
 | `bestExperience` | `true` | Keep the agent-cursor tools and show the visible cursor at boot (implicit transport session; a unique named session as fallback) |
 | `bestExperienceSession` | `perse-cua` | Driver session label that owns the best-experience cursor |
+| `indicator` | follows `bestExperience` | Show the macOS menu-bar indicator; set `false` to disable it |
+| `indicatorStateFile` | `~/Library/Application Support/perse-cua/indicator.json` | State file shared with the indicator helper |
 | `condenseDescriptions` | `true` | First-sentence descriptions |
 | `trimMenuTrees` | `true` | Remove `AXMenu*` subtrees from rendered trees |
 | `requestTimeoutMs` | `120000` | Per-call timeout |
@@ -139,6 +141,13 @@ silently ignored, so a driver upgrade that renames a tool is visible.
 - Actions run in the background by default and do not steal the user's focus.
   `move_cursor` in its default window scope paints the agent overlay only; moving the
   real OS pointer needs `scope: "desktop"`, which is a foreground takeover.
+- The menu-bar indicator starts with the plugin and exits after 60 seconds without
+  a state update. The next non-read-only tool call restarts it, also after choosing
+  **Hide indicator** or a failed launch; read-only calls do not restart it. Concurrent
+  calls in one plugin instance share a pending launch. Unloading the plugin removes
+  its state file and closes the launch waiter; the helper observes removal and
+  exits after its startup grace period of up to 10 seconds. Indicator failure
+  does not prevent driver tool calls.
 - A driver that cannot resolve a window's accessibility surface returns an **empty tree
   with `degraded_reason: ax_window_unresolved`** instead of a tree from the wrong
   surface. If you see that, the app's window changed underneath the driver; re-launch
@@ -152,6 +161,11 @@ npm run typecheck
 npm run build      # tsc -> lib/types, then tsdown -> lib/index.js
 npm test           # build + node --test test/*.test.mjs
 ```
+
+Indicator lifecycle tests run the built plugin with real subprocess fixtures for
+the driver and LaunchServices waiter. They cover exit, retry, concurrent calls and
+disposal without launching a GUI. Verify status-item appearance, idle recovery and
+removal separately on macOS with the packaged helper.
 
 ## License
 
