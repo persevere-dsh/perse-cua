@@ -95,7 +95,7 @@ this plugin owns that MCP connection itself:
 
 ```sh
 npm pack --workspace perse-cua
-dsh plugin --profile web add ./perse-cua-0.1.0.tgz
+dsh plugin --profile web add ./perse-cua-0.3.1-rc.1.tgz
 ```
 
 ### Configuration
@@ -159,8 +159,16 @@ silently ignored, so a driver upgrade that renames a tool is visible.
 npm ci
 npm run typecheck
 npm run build      # tsc -> lib/types, then tsdown -> lib/index.js
+npm run build:indicator --workspace perse-cua # macOS: build and verify the universal helper
 npm test           # build + node --test test/*.test.mjs
 ```
+
+Packing copies this README, its Chinese counterpart and LICENSE into the package.
+The helper build compiles both macOS architectures in a temporary directory and
+requires ad-hoc signing and strict verification before replacing the bundled app.
+Verify the extracted archive's signature before delivery; synchronized source
+folders can add Finder metadata that is absent from the npm archive. Ad-hoc signing
+does not provide Developer ID or notarization.
 
 Indicator lifecycle tests run the built plugin with real subprocess fixtures for
 the driver and LaunchServices waiter. They cover exit, retry, concurrent calls and

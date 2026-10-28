@@ -82,7 +82,7 @@ cua-driver 0.28.1 对外声明 **56 个工具**。不管这一轮任务碰不碰
 
 ```sh
 npm pack --workspace perse-cua
-dsh plugin --profile web add ./perse-cua-0.1.0.tgz
+dsh plugin --profile web add ./perse-cua-0.3.1-rc.1.tgz
 ```
 
 ### 配置项
@@ -142,6 +142,11 @@ npm test           # build + node --test test/*.test.mjs
 指示器生命周期测试运行构建后的插件，并用真实子进程替代驱动和 LaunchServices 等待进程，
 覆盖退出、重试、并发调用与卸载，不启动 GUI。状态栏图标显示、空闲后恢复以及移除效果，
 仍需在 macOS 上使用打包的辅助程序单独验证。
+
+打包前会将根目录的中英文 README 和 LICENSE 复制到安装包。
+在 macOS 上运行 `npm run build:indicator --workspace perse-cua` 会在临时目录编译双架构 helper；
+仅在 ad-hoc 签名与严格验证通过后替换包内 app。交付前需验证归档解压后的签名，
+因为同步源目录可能附加 npm 归档不包含的 Finder 元数据。Ad-hoc 签名不代表 Developer ID 签名或公证。
 
 ## 许可
 

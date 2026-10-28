@@ -5,7 +5,9 @@
   <key>CFBundleIdentifier</key><string>dsh.perse.cua.indicator</string>
   <key>CFBundleName</key><string>perse-cua-indicator</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.3.0</string>
+  <key>CFBundleShortVersionString</key><string>0.3.1</string>
+  <key>CFBundleVersion</key><string>0.3.1</string>
+  <key>PerseCuaPackageVersion</key><string>0.3.1-rc.1</string>
   <key>LSUIElement</key><true/>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
 </dict></plist>

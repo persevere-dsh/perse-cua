@@ -1,6 +1,6 @@
 {
   "name": "perse-cua",
-  "version": "0.3.0",
+  "version": "0.3.1-rc.1",
   "private": true,
   "description": "perse-cua: front cua-driver's desktop-automation tools without their schema weight, for Persevere with DSH (perse = persevere)",
   "type": "module",
@@ -15,11 +15,13 @@
   },
   "files": [
     "lib/index.js",
-    "bin/**",
+    "bin/PerseCuaIndicator.app/**",
     "lib/types/**/*.js",
     "lib/types/**/*.d.ts",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
   ],
   "dsh": {
     "bundle": {
@@ -28,7 +30,8 @@
   },
   "scripts": {
     "build": "cd ../.. && npm run build",
-    "build:indicator": "bash ../../scripts/build-indicator.sh"
+    "build:indicator": "bash ../../scripts/build-indicator.sh",
+    "prepack": "node ../../scripts/prepare-package-docs.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2"

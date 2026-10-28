@@ -2,3 +2,8 @@ node_modules/
 lib/
 dist/
 *.tgz
+
+# Copied from the repository sources before packing.
+packages/perse-cua/README.md
+packages/perse-cua/README.zh.md
+packages/perse-cua/LICENSE
