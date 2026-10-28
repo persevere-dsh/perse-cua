@@ -19,28 +19,41 @@
  */
 
 /**
- * Tools that cannot change a task outcome, so denying them costs nothing:
- *
- * - four `*_agent_cursor_*` tools paint overlay artwork;
- * - `check_for_update` duplicates the `cua-driver check-update` CLI;
- * - `escalate_session` and `get_session_state` are deprecated compatibility shims
- *   (the driver's own descriptions say so).
+ * The four `*_agent_cursor_*` tools. An earlier revision denied them as overlay
+ * "artwork"; that judgment predates the Codex-style background-driving
+ * experience, where the **visible agent cursor is the product**: the user sees
+ * exactly where the agent is working while their own mouse and focus stay free.
+ * They are a capability, not waste, and `bestExperience` (on by default) keeps
+ * them and turns the cursor on at boot.
  */
-export const WASTE_ONLY_TOOLS: readonly string[] = [
+export const CURSOR_EXPERIENCE_TOOLS: readonly string[] = [
   'set_agent_cursor_enabled',
   'set_agent_cursor_motion',
   'set_agent_cursor_theme',
   'get_agent_cursor_state',
+]
+
+/**
+ * Tools that cannot change a task outcome, so denying them costs nothing:
+ *
+ * - `check_for_update` duplicates the `cua-driver check-update` CLI;
+ * - `escalate_session` and `get_session_state` are deprecated compatibility
+ *   shims (the driver's own descriptions say so).
+ */
+export const BASE_WASTE_TOOLS: readonly string[] = [
   'check_for_update',
   'escalate_session',
   'get_session_state',
 ]
 
+/** All provable waste, including the cursor tools: the deny set when `bestExperience` is off. */
+export const WASTE_ONLY_TOOLS: readonly string[] = [...BASE_WASTE_TOOLS, ...CURSOR_EXPERIENCE_TOOLS]
+
 /**
- * Default deny list. Kept tiny on purpose: everything in it must be provably
- * incapable of affecting a task.
+ * Default deny list (`bestExperience` on). Kept tiny on purpose: everything in
+ * it must be provably incapable of affecting a task.
  */
-export const DEFAULT_DENY: readonly string[] = WASTE_ONLY_TOOLS
+export const DEFAULT_DENY: readonly string[] = BASE_WASTE_TOOLS
 
 /** Default allow list: absent, meaning "keep every tool the driver advertises". */
 export const DEFAULT_ALLOW: readonly string[] | undefined = undefined
@@ -52,6 +65,10 @@ export const DEFAULT_ALLOW: readonly string[] | undefined = undefined
  * Prefer this only when request size matters more than reach, and prefer extending
  * it over trimming it — an allow list is a capability ceiling, and a tool missing
  * from it is invisible to the model rather than merely unused.
+ *
+ * Note: under `bestExperience` (the default) the agent-cursor tools are unioned
+ * back in — see {@link minimalAllowWithCursor}; deny them explicitly to cut them
+ * regardless.
  */
 export const MINIMAL_ALLOW: readonly string[] = [
   // discover + launch
@@ -87,6 +104,16 @@ export const MINIMAL_ALLOW: readonly string[] = [
   'health_report',
   'get_config',
 ]
+
+/**
+ * `MINIMAL_ALLOW` plus the four agent-cursor tools, so a token-tight profile can
+ * still show the visible cursor under `bestExperience`. Applied by the plugin when
+ * `allow` is exactly `MINIMAL_ALLOW`; an explicit custom allow list is respected
+ * verbatim.
+ */
+export function minimalAllowWithCursor(): readonly string[] {
+  return [...MINIMAL_ALLOW, ...CURSOR_EXPERIENCE_TOOLS]
+}
 
 /** One tool's admission decision. */
 export interface ToolDecision {

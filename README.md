@@ -21,7 +21,7 @@ model request whether or not the task touches a GUI. Measured on the released dr
 | | tools | model-facing schema | ≈ tokens per request |
 | --- | --- | --- | --- |
 | plain `@deepseek-ai/dsh-mcp-client` row | 56 | 95.1 KB | ~24,300 |
-| through `perse-cua` (default) | 49 | 60.0 KB | ~15,400 (**−37%**) |
+| through `perse-cua` (default) | 53 | 61.7 KB | ~15,800 (**−35%**) |
 
 And once a task *is* driving an app, a raw window snapshot is mostly menu bar: on a
 230×408 Calculator window the menu subtree was 145 of 146 elements and **88% of the
@@ -34,14 +34,22 @@ rendered bytes**. It can never be an automation target — menu items are reache
    comes from. The full operating procedure is not lost: it already ships as the
    `cua-driver` skill, which the model loads on demand. Parameter schemas pass through
    untouched, so every tool still validates.
-2. **Denies only proven waste.** The default `deny` list is seven tools that cannot
-   change a task outcome: four `*_agent_cursor_*` overlay-artwork tools, the
-   `check_for_update` probe, and two deprecated compatibility shims
-   (`escalate_session`, `get_session_state`). Everything else the driver advertises
-   reaches the model.
+2. **Denies only proven waste.** With `bestExperience` on (the default) the default
+   `deny` list is the three tools that cannot change a task outcome: the
+   `check_for_update` probe and the two deprecated compatibility shims
+   (`escalate_session`, `get_session_state`). Set `bestExperience: false` to also deny
+   the four `*_agent_cursor_*` tools, restoring the old surface. Everything else the
+   driver advertises reaches the model.
 3. **Strips the accessibility menu bar** out of rendered trees, leaving the window block
    byte-identical — including the original element numbering, because an `element_token`
    must keep resolving against the snapshot the driver cached.
+4. **Turns on the macOS best experience** by default: at boot the plugin opens a named
+   driver session (default label `perse-cua`) and shows its **agent cursor** — the
+   Codex-style effect where you watch a visible cursor do the work in a background
+   window while your own mouse, keyboard focus, and frontmost app stay untouched.
+   The four `*_agent_cursor_*` tools stay in front of the model so it can re-theme,
+   re-time, or hide the cursor mid-task. A driver that rejects the call degrades to
+   "cursor hidden"; the boot never breaks.
 
 ### Why the default is this conservative
 
@@ -54,8 +62,8 @@ corrected split:
 | policy | tools | schema | ≈ tokens | capability |
 | --- | --- | --- | --- | --- |
 | description condensation alone | 56 | 62.7 KB | ~16,000 | complete |
-| **default: condensation + deny waste** | **49** | **60.0 KB** | **~15,400** | **complete** |
-| condensation + `MINIMAL_ALLOW` | 27 | 39.7 KB | ~10,200 | desktop only |
+| **default: condensation + deny waste** | **53** | **61.7 KB** | **~15,800** | **complete** |
+| condensation + `MINIMAL_ALLOW` (cursor unioned in) | 31 | ~41.5 KB | ~10,700 | desktop only |
 
 The condensed-everything row is the honest upper bound on what is free. An allow list is
 a **capability ceiling**: a tool missing from it is invisible to the model rather than
@@ -98,8 +106,10 @@ dsh plugin --profile web add ./perse-cua-0.1.0.tgz
 | `args` | `["mcp"]` | Arguments for the driver |
 | `env` | — | Extra environment for the child process |
 | `serverName` | `cua` | Namespace; tools appear as `mcp__<serverName>__<tool>` |
-| `allow` | omitted | Bare tool names to keep. Omit to keep every advertised tool except `deny`. Pass `MINIMAL_ALLOW` for the token-tight desktop-only cut |
-| `deny` | `WASTE_ONLY_TOOLS` | Bare tool names to drop; wins over `allow` |
+| `allow` | omitted | Bare tool names to keep. Omit to keep every advertised tool except `deny`. Pass `MINIMAL_ALLOW` for the token-tight desktop-only cut (cursor tools are unioned back in under `bestExperience`) |
+| `deny` | 3 shims | Bare tool names to drop; wins over `allow`. `bestExperience: false` restores the four cursor tools to the deny set |
+| `bestExperience` | `true` | Keep the agent-cursor tools and show the visible cursor at boot (implicit transport session; a unique named session as fallback) |
+| `bestExperienceSession` | `perse-cua` | Driver session label that owns the best-experience cursor |
 | `condenseDescriptions` | `true` | First-sentence descriptions |
 | `trimMenuTrees` | `true` | Remove `AXMenu*` subtrees from rendered trees |
 | `requestTimeoutMs` | `120000` | Per-call timeout |

@@ -13,7 +13,10 @@
  * 2. condenses each tool description to its first sentence, leaving the schema
  *    untouched so every parameter still validates;
  * 3. strips the accessibility menu bar out of rendered trees (`trim.ts`), which
- *    on a small window is ~84% of the lines and never an automation target.
+ *    on a small window is ~84% of the lines and never an automation target;
+ * 4. turns on the macOS best experience by default (`bestExperience`): the four
+ *    agent-cursor tools stay in the surface and a named session shows the visible
+ *    agent cursor at boot — Codex-style background driving the user can watch.
  *
  * It owns the MCP connection itself instead of wrapping `dsh-mcp-client` because
  * the harness exposes no result-projection hook: `tools.restrict()` requires an
@@ -23,7 +26,7 @@
  * @module perse-cua
  */
 
-import { curateTools, DEFAULT_DENY } from './curate.ts'
+import { curateTools, BASE_WASTE_TOOLS, CURSOR_EXPERIENCE_TOOLS, MINIMAL_ALLOW, minimalAllowWithCursor } from './curate.ts'
 import { McpStdioClient, McpTransportError, type McpCallResult, type McpContentBlock, type McpTool } from './mcp.ts'
 import { condenseDescription, trimAxMenuTree } from './trim.ts'
 
@@ -47,12 +50,34 @@ export interface Config {
    * Pass `MINIMAL_ALLOW` for the token-tight desktop-only cut.
    */
   allow?: string[]
-  /** Bare tool names to drop; wins over `allow`. Defaults to `WASTE_ONLY_TOOLS`. */
+  /** Bare tool names to drop; wins over `allow`. Default: 3 provable-waste tools (`bestExperience` on). */
   deny?: string[]
   /** Condense descriptions to their first sentence. Default `true`. */
   condenseDescriptions?: boolean
   /** Strip accessibility menu subtrees from rendered trees. Default `true`. */
   trimMenuTrees?: boolean
+  /**
+   * macOS best experience, on by default. Does two things:
+   *
+   * 1. keeps the four `*_agent_cursor_*` tools in front of the model — the visible
+   *    agent cursor is how a background-driven app announces itself (Codex-style),
+   *    so these are a capability, not waste;
+   * 2. at boot, shows the agent cursor on this transport's session, so the user
+   *    can watch where the agent works while their own mouse and focus stay free
+   *    (forwarded calls carry no session label and act through the same implicit
+   *    lease, so its cursor is the one that animates). A failure degrades to
+   *    "cursor hidden", never to a broken boot.
+   *
+   * Set `false` to restore the cursor-denying surface and skip the boot session.
+   */
+  bestExperience?: boolean
+  /**
+   * Explicit session label owning the best-experience cursor. By default the
+   * transport's implicit session is used (correct for unlabeled forwarded calls);
+   * set this only to pin a named session — note a fixed label that has ended on a
+   * shared daemon stays bound to its old lease and can reject revival.
+   */
+  bestExperienceSession?: string
   /** Per-call timeout for driver tool calls, milliseconds. */
   requestTimeoutMs?: number
   /** Time budget for spawning the driver and completing the handshake. */
@@ -96,6 +121,9 @@ export function apply(ctx: { tools: { register: (definition: unknown) => () => v
   const prefix = `mcp__${serverName}__`
   const condense = config.condenseDescriptions !== false
   const trimTrees = config.trimMenuTrees !== false
+  const bestExperience = config.bestExperience !== false
+  let cursorSession: string | undefined
+  let cursorSessionOpen = false
 
   const client = new McpStdioClient({
     command: config.command ?? 'cua-driver',
@@ -109,10 +137,76 @@ export function apply(ctx: { tools: { register: (definition: unknown) => () => v
   const disposers: Array<() => void> = []
   let started = false
 
+  /**
+   * The allow/deny actually applied, given `bestExperience`. Cursor tools are waste
+   * only when the cursor is invisible; with best experience on they stay in the
+   * surface, and a `MINIMAL_ALLOW` profile gets them unioned back in so a
+   * token-tight row still shows the cursor. A custom `allow` list is respected
+   * verbatim; an explicit `deny` always wins (curateTools precedence).
+   */
+  const resolvePolicy = (): { allow: readonly string[] | undefined; deny: readonly string[] } => {
+    const deny = config.deny ?? (bestExperience ? BASE_WASTE_TOOLS : [...BASE_WASTE_TOOLS, ...CURSOR_EXPERIENCE_TOOLS])
+    const allow = config.allow
+    if (allow === undefined) return { allow: undefined, deny }
+    if (bestExperience && allow.length === MINIMAL_ALLOW.length && MINIMAL_ALLOW.every(name => allow.includes(name))) {
+      return { allow: minimalAllowWithCursor(), deny }
+    }
+    return { allow, deny }
+  }
+
+  /**
+   * Show the agent cursor (Codex-style: the user sees where the agent works;
+   * their own pointer and focus stay free).
+   *
+   * The session that owns the cursor is, in order:
+   *
+   * 1. `bestExperienceSession` when configured (explicit label);
+   * 2. the transport's **implicit session** — right, because tool calls this
+   *    plugin forwards carry no session label and therefore act through the
+   *    implicit lease, so its cursor is the one that animates;
+   * 3. a fresh unique named session as a last resort (never a fixed default:
+   *    an ended name stays bound to its dead lease on a shared daemon and
+   *    would reject revival from a new transport).
+   *
+   * Any failure degrades to the cursor staying hidden — never to a broken boot.
+   */
+  const enableBestExperienceCursor = async (): Promise<void> => {
+    try {
+      if (config.bestExperienceSession !== undefined) {
+        await client.callTool('start_session', { session: config.bestExperienceSession })
+        cursorSession = config.bestExperienceSession
+        cursorSessionOpen = true
+      } else {
+        try {
+          const res = await client.callTool('start_session', {})
+          const text = res.content.find(block => block.type === 'text')?.text
+          const parsed: unknown = text === undefined ? undefined : JSON.parse(text)
+          const implicit = typeof parsed === 'object' && parsed !== null && typeof (parsed as { session?: unknown }).session === 'string'
+            ? (parsed as { session: string }).session
+            : undefined
+          if (implicit !== undefined) {
+            cursorSession = implicit // implicit lease ends with the transport; nothing to clean up
+          } else {
+            throw new Error('start_session returned no implicit session name')
+          }
+        } catch {
+          cursorSession = `perse-cua-${String(process.pid)}-${Date.now().toString(36)}`
+          await client.callTool('start_session', { session: cursorSession })
+          cursorSessionOpen = true
+        }
+      }
+      await client.callTool('set_agent_cursor_enabled', { session: cursorSession, enabled: true })
+      console.log(`[perse-cua] best experience: agent cursor on (session "${cursorSession}")`)
+    } catch (error: unknown) {
+      console.log(`[perse-cua] best experience cursor unavailable, continuing without it: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   const boot = async (): Promise<void> => {
     await client.start()
     const advertised = await client.listTools()
-    const curation = curateTools(advertised.map(tool => tool.name), config.allow, config.deny ?? DEFAULT_DENY)
+    const policy = resolvePolicy()
+    const curation = curateTools(advertised.map(tool => tool.name), policy.allow, policy.deny)
     const byName = new Map(advertised.map(tool => [tool.name, tool]))
 
     let before = 0
@@ -125,7 +219,8 @@ export function apply(ctx: { tools: { register: (definition: unknown) => () => v
       const afterBytes = definitionBytes(tool, condense)
       after += afterBytes
       if (afterBytes < definitionBytes(tool, false)) trimmed += 1
-      disposers.push(registerTool(ctx, client, tool, prefix, condense, trimTrees))
+      disposers.push(registerTool(ctx, client, tool, prefix, condense, trimTrees,
+        bestExperience ? () => cursorSession : undefined))
     }
 
     started = true
@@ -138,6 +233,8 @@ export function apply(ctx: { tools: { register: (definition: unknown) => () => v
       console.log(`[perse-cua] allow-list entries matching no advertised tool: ${curation.unmatched.join(', ')}`)
     }
     if (byName.size === 0) console.log('[perse-cua] cua-driver advertised no tools')
+
+    if (bestExperience) await enableBestExperienceCursor()
   }
 
   boot().catch((error: unknown) => {
@@ -154,9 +251,25 @@ export function apply(ctx: { tools: { register: (definition: unknown) => () => v
       }
     }
     disposers.length = 0
-    if (started) client.close()
-    else client.close()
+    if (started && cursorSessionOpen) {
+      client.callTool('end_session', { session: cursorSession }).catch(() => {
+        // Best-effort cleanup; closing the transport ends the lease anyway.
+      })
+    }
+    client.close()
   }
+}
+
+/** Tools that manage sessions themselves; never inject a session into them. */
+const SESSION_LIFECYCLE = new Set([
+  'start_session', 'end_session', 'get_session', 'list_sessions', 'get_session_state',
+  'set_agent_cursor_enabled', 'set_agent_cursor_motion', 'set_agent_cursor_theme', 'get_agent_cursor_state',
+])
+
+/** Whether a driver tool's schema accepts a `session` argument. */
+function acceptsSession(tool: McpTool): boolean {
+  const props = (tool.inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties
+  return props !== undefined && Object.prototype.hasOwnProperty.call(props, 'session')
 }
 
 /** Register one cua-driver tool under the harness namespace. */
@@ -167,6 +280,7 @@ function registerTool(
   prefix: string,
   condense: boolean,
   trimTrees: boolean,
+  cursorFor?: () => string | undefined,
 ): () => void {
   const rawName = tool.name
   const truncated = condense ? condenseDescription(tool.description ?? '', DESCRIPTION_BUDGET) : (tool.description ?? '')
@@ -185,7 +299,13 @@ function registerTool(
     },
     isConcurrencySafe: () => READ_ONLY_TOOLS.has(rawName),
     async execute(args: unknown): Promise<{ blocks: RenderBlock[] }> {
-      const callArgs = args !== null && typeof args === 'object' ? (args as Record<string, unknown>) : {}
+      let callArgs: Record<string, unknown> = args !== null && typeof args === 'object' ? (args as Record<string, unknown>) : {}
+      // Best experience: unlabeled calls would act through the implicit lease, whose
+      // cursor nobody enabled. Route them through the cursor session so the overlay
+      // animates — Codex-style — while still letting the model override `session`.
+      if (cursorFor !== undefined && callArgs.session === undefined && acceptsSession(tool) && !SESSION_LIFECYCLE.has(rawName)) {
+        callArgs = { session: cursorFor(), ...callArgs }
+      }
       const result = await client.callTool(rawName, callArgs)
       const blocks = await project(ctx, result, trimTrees)
       if (result.isError === true) {
@@ -265,6 +385,9 @@ async function admitImage(
   }
 }
 
-export { curateTools, bareToolName, DEFAULT_ALLOW, DEFAULT_DENY, MINIMAL_ALLOW, WASTE_ONLY_TOOLS } from './curate.ts'
+export {
+  curateTools, bareToolName, DEFAULT_ALLOW, DEFAULT_DENY, MINIMAL_ALLOW,
+  WASTE_ONLY_TOOLS, BASE_WASTE_TOOLS, CURSOR_EXPERIENCE_TOOLS, minimalAllowWithCursor,
+} from './curate.ts'
 export { trimAxMenuTree, condenseDescription } from './trim.ts'
 export type { McpTool } from './mcp.ts'
