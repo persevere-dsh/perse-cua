@@ -11,7 +11,24 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./typert": {
+      "types": "./lib/typert.host.d.ts",
+      "default": "./lib/typert.host.js"
+    },
+    "./remote": {
+      "types": "./lib/typert.remote-client.d.ts",
+      "default": "./lib/typert.remote-client.js"
+    },
+    "./types": {
+      "types": "./lib/types/view.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": "./lib/client.js",
+    "./presenter": {
+      "types": "./lib/types/presenter.d.ts",
+      "default": "./lib/presenter.js"
+    }
   },
   "files": [
     "lib/index.js",
@@ -20,12 +37,26 @@
     "lib/types/**/*.d.ts",
     "cordis.patch.yml",
     "README.md",
+    "lib/typert.host.js",
+    "lib/typert.host.d.ts",
+    "lib/typert.remote-client.js",
+    "lib/typert.remote-client.d.ts",
+    "lib/client.js",
     "README.zh.md",
-    "LICENSE"
+    "LICENSE",
+    "lib/presenter.js"
   ],
   "dsh": {
     "bundle": {
       "patch": "cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-gateway",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-locale"
+      ]
     }
   },
   "scripts": {
@@ -34,7 +65,11 @@
     "prepack": "node ../../scripts/prepare-package-docs.mjs"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.2"
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-typert-protocol": "0.2.1-rc.2"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "zod": "^4.4.3"
+  }
 }

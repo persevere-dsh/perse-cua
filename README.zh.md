@@ -89,14 +89,15 @@ dsh plugin --profile web add ./perse-cua-0.3.1-rc.1.tgz
 
 | 字段 | 默认 | 含义 |
 | --- | --- | --- |
+| `presenterOnly` | `false` | 仅提供预览服务，不启动驱动或注册驱动工具 |
 | `command` | `cua-driver` | 驱动可执行文件 |
 | `args` | `["mcp"]` | 传给驱动的参数 |
 | `env` | — | 子进程额外环境变量 |
 | `serverName` | `cua` | 命名空间；工具名为 `mcp__<serverName>__<tool>` |
 | `allow` | 省略 | 要保留的裸工具名。省略 = 保留驱动声明的全部（减去 `deny`）。传 `MINIMAL_ALLOW` 走仅桌面的紧裁剪（`bestExperience` 下会自动并回光标工具） |
 | `deny` | 3 个 shim | 要去掉的裸工具名；优先于 `allow`。`bestExperience: false` 时把 4 个光标工具加回拒绝集 |
-| `bestExperience` | `true` | 保留 agent 光标工具，并在启动时显示可见光标（默认用传输层隐式会话；不可用时回退为唯一命名会话） |
-| `bestExperienceSession` | `perse-cua` | 持有最佳体验光标的驱动会话标签 |
+| `bestExperience` | `true` | 保留 agent 光标工具，并在启动时显示可见光标（默认使用传输层隐式会话） |
+| `bestExperienceSession` | 省略 | 持有最佳体验光标的驱动会话标签 |
 | `indicator` | 跟随 `bestExperience` | 显示 macOS 菜单栏指示器；设为 `false` 可关闭 |
 | `indicatorStateFile` | `~/Library/Application Support/perse-cua/indicator.json` | 与指示器辅助进程共享的状态文件 |
 | `condenseDescriptions` | `true` | 描述压到首句 |
@@ -107,12 +108,16 @@ dsh plugin --profile web add ./perse-cua-0.3.1-rc.1.tgz
 `allow` 与 `deny` 都同时接受裸名（`click`）和带命名空间的名字（`mcp__cua__click`）。
 `allow` 里匹配不到任何实际工具的条目会被记进日志而不是被静默忽略，这样驱动升级改了工具名你能看见。
 
+## 驱动预览
+
+插件维护预览服务并向浏览器客户端推送各窗口的独立画面。窗口读取和针对窗口的操作可识别目标；预览截图沿用操作的会话。选择卡片可放大、切换窗口或关闭卡片。画面时间是收到截图响应的时间。仅当驱动接受的像素点击与同一窗口、会话和截图绑定时，预览会短暂显示点击位置；这是操作标记，真实 agent 光标由驱动绘制在目标窗口上，可能不出现在窗口截图中。没有经验证像素位置的操作不会显示标记。插件在显示预览前检查目标窗口列表；窗口离屏或不存在时保留上次画面和时间，并标记窗口不可见。截图或枚举失败时，卡片标记截图不可用；不再需要时可关闭。预览流意外结束时，客户端清除过期卡片并重试。预览需要 Agent 所有者以及宿主的 Remote 网关和客户端插槽。
+
+导出的 `PreviewService` 也可由其他提供方调用 `put` 和 `remove`；提供方负责授权、光标行为和移除自己的窗口。
+
+`perse-cua/presenter` 入口仅注册预览服务，不能启动或配置驱动；提供方负责授权和光标行为。动作位置标记指向匹配截图上的提交坐标；驱动可能通过辅助功能而非鼠标按压执行操作。
+
 ## 它刻意不做什么
 
-- **不产出 Typert 工件，因此没有 `codegen` 脚本。** `perse-cua` 不注册 Cordis 服务、不发事件、
-  不暴露 `@Remote` 方法，所以 Typert 生成器为它发现不了任何 face，直接以 `discovered: []` 结束。
-  manifest 因此不声明 `./typert` / `./remote`，而不是挂一个指向空文件的导出。
-  维护者 profile 里那个能正常工作的宿主侧插件 `dsh-zai-search-tools` 是同样的形态。
 - **不自动重连。** 驱动进程死掉会表现为调用失败，并且在 harness 重载插件前一直失败。
   cua-driver 是本地进程，静默重拉被判定为比明确报错更糟。
 

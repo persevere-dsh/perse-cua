@@ -102,14 +102,15 @@ dsh plugin --profile web add ./perse-cua-0.3.1-rc.1.tgz
 
 | Field | Default | Meaning |
 | --- | --- | --- |
+| `presenterOnly` | `false` | Provide only the preview service; do not start a driver or register its tools |
 | `command` | `cua-driver` | Driver executable |
 | `args` | `["mcp"]` | Arguments for the driver |
 | `env` | — | Extra environment for the child process |
 | `serverName` | `cua` | Namespace; tools appear as `mcp__<serverName>__<tool>` |
 | `allow` | omitted | Bare tool names to keep. Omit to keep every advertised tool except `deny`. Pass `MINIMAL_ALLOW` for the token-tight desktop-only cut (cursor tools are unioned back in under `bestExperience`) |
 | `deny` | 3 shims | Bare tool names to drop; wins over `allow`. `bestExperience: false` restores the four cursor tools to the deny set |
-| `bestExperience` | `true` | Keep the agent-cursor tools and show the visible cursor at boot (implicit transport session; a unique named session as fallback) |
-| `bestExperienceSession` | `perse-cua` | Driver session label that owns the best-experience cursor |
+| `bestExperience` | `true` | Keep the agent-cursor tools and show the visible cursor at boot (implicit transport session) |
+| `bestExperienceSession` | omitted | Driver session label that owns the best-experience cursor |
 | `indicator` | follows `bestExperience` | Show the macOS menu-bar indicator; set `false` to disable it |
 | `indicatorStateFile` | `~/Library/Application Support/perse-cua/indicator.json` | State file shared with the indicator helper |
 | `condenseDescriptions` | `true` | First-sentence descriptions |
@@ -121,14 +122,16 @@ Both `allow` and `deny` accept bare (`click`) or namespaced (`mcp__cua__click`) 
 An `allow` entry that matches no advertised tool is reported in the log rather than
 silently ignored, so a driver upgrade that renames a tool is visible.
 
+## Driving previews
+
+The plugin owns the preview service and streams separate window images to its browser client. It identifies targets from window reads and window-targeted actions, and preserves the action session when requesting a preview. Select a card to enlarge it, switch windows, or close a card. The image time is the response receipt time. A brief click indicator appears only when the driver accepts a pixel click bound to the same window, session, and captured image; it is an action marker, while the actual agent cursor is rendered by the driver on the target window and may not appear in window screenshots. Actions without a verified pixel position show no marker. The plugin checks the target window list before publishing a preview; an off-screen or absent window keeps its last image and time and is marked unavailable. If capture or enumeration fails, the card marks the screenshot unavailable; dismiss it when no longer needed. The client clears stale cards and retries an unexpectedly ended preview stream. A preview requires an Agent owner and the host Remote gateway and client slots.
+
+The exported `PreviewService` can also receive `put` and `remove` calls from a different provider. That provider owns authorization, cursor behavior, and removing its windows.
+
+The `perse-cua/presenter` entry registers only the preview service and never starts or configures the driver. Its provider owns authorization and cursor behavior. The action-position marker identifies the submitted point on the matching captured image; a driver may dispatch that action using accessibility rather than a pointer press.
+
 ## What it deliberately does not do
 
-- **No Typert artifacts, and therefore no `codegen` script.** `perse-cua` registers no
-  Cordis service, emits no event, and exposes no `@Remote` method, so the Typert
-  generator discovers no face for it — it exits with `discovered: []`. The manifest
-  declares no `./typert` or `./remote` export rather than shipping dangling paths.
-  `dsh-zai-search-tools`, the working host-only plugin in the maintainer's profile,
-  has the same shape.
 - **No reconnect.** A driver process that dies is reported as a failed call; the next
   call fails too until the harness reloads the plugin. cua-driver is a local process,
   and silent respawn was judged worse than a visible failure.

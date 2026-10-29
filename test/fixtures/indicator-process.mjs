@@ -25,8 +25,13 @@ export async function launch(root) {
   await pause(config.launchDelayMs ?? 0)
   const child = spawn(process.execPath, [fixture, 'helper', root, stateFile], { stdio: 'ignore' })
   record(root, { type: 'helper-spawned', childPid: child.pid })
-  if (args.includes('-W')) await new Promise(resolve => child.once('close', resolve))
-  else child.unref()
+  if (args.includes('-W')) {
+    await new Promise(resolve => child.once('close', resolve))
+    if (config.exitBarrier === true) {
+      record(root, { type: 'launcher-waiting' })
+      while (!existsSync(path.join(root, 'release-launcher'))) await pause(10)
+    }
+  } else child.unref()
   record(root, { type: 'launcher-exit' })
 }
 

@@ -34,6 +34,11 @@ import { fileURLToPath } from 'node:url'
 import { curateTools, BASE_WASTE_TOOLS, CURSOR_EXPERIENCE_TOOLS, MINIMAL_ALLOW, minimalAllowWithCursor } from './curate.ts'
 import { McpStdioClient, McpTransportError, type McpCallResult, type McpContentBlock, type McpTool } from './mcp.ts'
 import { condenseDescription, trimAxMenuTree } from './trim.ts'
+import type { Context } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import { PreviewService, type PreviewWindow } from './view.ts'
+export { PreviewService } from './view.ts'
+export type { PreviewWindow } from './view.ts'
 
 export const name = 'perse-cua'
 
@@ -42,6 +47,8 @@ export const inject = ['tools']
 
 /** Plugin configuration, read from the loader row's `config` block. */
 export interface Config {
+  /** Provide the preview service without starting a driver or registering its tools. */
+  presenterOnly?: boolean
   /** cua-driver executable; defaults to `cua-driver` on PATH. */
   command?: string
   /** Arguments for the driver; defaults to `['mcp']`. */
@@ -69,8 +76,7 @@ export interface Config {
    *    so these are a capability, not waste;
    * 2. at boot, shows the agent cursor on this transport's session, so the user
    *    can watch where the agent works while their own mouse and focus stay free
-   *    (forwarded calls carry no session label and act through the same implicit
-   *    lease, so its cursor is the one that animates). A failure degrades to
+   *    (unlabeled calls use the same transport lease). A failure degrades to
    *    "cursor hidden", never to a broken boot.
    *
    * Set `false` to restore the cursor-denying surface and skip the boot session.
@@ -86,19 +92,12 @@ export interface Config {
   /**
    * Menu-bar session indicator (macOS only; follows `bestExperience` when
    * omitted). A tiny LSUIElement app shipped in `bin/` shows an "assistive
-   * session" status item at boot, brightening while non-read-only tools run.
-   * After the helper exits (including its idle timeout), the next non-read-only
-   * call restarts it. Startup failure never blocks a driver tool call.
+   * session" status item at boot and restarts it on activity after it exits.
    */
   indicator?: boolean
   /** State file the indicator polls; defaults to ~/Library/Application Support/perse-cua/indicator.json. */
   indicatorStateFile?: string
-  /**
-   * Driving view (follows `bestExperience` when omitted): while tools drive a
-   * window, upserts an in-app panel (DSH's `panels` service) showing that
-   * window's live thumbnail plus an action caption — draggable by the user,
-   * auto-removed when driving goes idle. No-op when the host lacks panels.
-   */
+  /** Show window previews in hosts with the Remote gateway and client slots. */
   drivingPanel?: boolean
   /** Per-call timeout for driver tool calls, milliseconds. */
   requestTimeoutMs?: number
@@ -138,7 +137,9 @@ function definitionBytes(tool: McpTool, condense: boolean): number {
  * @param config - loader row configuration; every field is optional.
  * @returns a disposer that unregisters every tool and stops the driver.
  */
-export function apply(ctx: { tools: { register: (definition: unknown) => () => void }; get: (name: string) => unknown; logger?: { info: (message: string) => void } }, config: Config = {}): () => void {
+export const apply = (ctx: Context & { tools: { register: (definition: unknown) => () => void }; logger?: { info: (message: string) => void } }, config: Config = {}): (() => void) => {
+  const view = new PreviewService(ctx)
+  if (config.presenterOnly === true) return () => view.close()
   const serverName = config.serverName ?? 'cua'
   const prefix = `mcp__${serverName}__`
   const condense = config.condenseDescriptions !== false
@@ -176,49 +177,18 @@ export function apply(ctx: { tools: { register: (definition: unknown) => () => v
     return { allow, deny }
   }
 
-  /**
-   * Show the agent cursor (Codex-style: the user sees where the agent works;
-   * their own pointer and focus stay free).
-   *
-   * The session that owns the cursor is, in order:
-   *
-   * 1. `bestExperienceSession` when configured (explicit label);
-   * 2. the transport's **implicit session** — right, because tool calls this
-   *    plugin forwards carry no session label and therefore act through the
-   *    implicit lease, so its cursor is the one that animates;
-   * 3. a fresh unique named session as a last resort (never a fixed default:
-   *    an ended name stays bound to its dead lease on a shared daemon and
-   *    would reject revival from a new transport).
-   *
-   * Any failure degrades to the cursor staying hidden — never to a broken boot.
-   */
+  /** Enable the cursor on the transport's implicit session or the configured named session. */
   const enableBestExperienceCursor = async (): Promise<void> => {
     try {
-      if (config.bestExperienceSession !== undefined) {
-        await client.callTool('start_session', { session: config.bestExperienceSession })
-        cursorSession = config.bestExperienceSession
-        cursorSessionOpen = true
-      } else {
-        try {
-          const res = await client.callTool('start_session', {})
-          const text = res.content.find(block => block.type === 'text')?.text
-          const parsed: unknown = text === undefined ? undefined : JSON.parse(text)
-          const implicit = typeof parsed === 'object' && parsed !== null && typeof (parsed as { session?: unknown }).session === 'string'
-            ? (parsed as { session: string }).session
-            : undefined
-          if (implicit !== undefined) {
-            cursorSession = implicit // implicit lease ends with the transport; nothing to clean up
-          } else {
-            throw new Error('start_session returned no implicit session name')
-          }
-        } catch {
-          cursorSession = `perse-cua-${String(process.pid)}-${Date.now().toString(36)}`
-          await client.callTool('start_session', { session: cursorSession })
-          cursorSessionOpen = true
-        }
-      }
-      await client.callTool('set_agent_cursor_enabled', { session: cursorSession, enabled: true })
-      console.log(`[perse-cua] best experience: agent cursor on (session "${cursorSession}")`)
+      const session = config.bestExperienceSession
+      const args = session === undefined ? {} : { session }
+      const startedSession = await client.callTool('start_session', args)
+      if (startedSession.isError === true) throw new Error('start_session was refused')
+      cursorSession = session
+      cursorSessionOpen = session !== undefined
+      const enabled = await client.callTool('set_agent_cursor_enabled', { ...args, enabled: true })
+      if (enabled.isError === true) throw new Error('set_agent_cursor_enabled was refused')
+      console.log(`[perse-cua] best experience: agent cursor on (${session === undefined ? 'implicit transport session' : `session "${session}"`})`)
     } catch (error: unknown) {
       console.log(`[perse-cua] best experience cursor unavailable, continuing without it: ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -237,6 +207,7 @@ export function apply(ctx: { tools: { register: (definition: unknown) => () => v
   let indicatorLaunched = false
   let indicatorClosed = false
   let indicatorProcess: ChildProcess | undefined
+  let indicatorActivity = 0
   let indicatorStateWritten = false
   let indicatorTimer: ReturnType<typeof setTimeout> | undefined
   let lastStateWrite = 0
@@ -255,12 +226,13 @@ export function apply(ctx: { tools: { register: (definition: unknown) => () => v
   const launchIndicator = (): void => {
     if (!indicatorEnabled || indicatorClosed || indicatorLaunched || process.platform !== 'darwin') return
     indicatorLaunched = true
+    const launchedAtActivity = indicatorActivity
     try {
       mkdirSync(path.dirname(stateFile), { recursive: true })
     } catch {
       // fall through; the state write reports real trouble
     }
-    writeIndicatorState(false)
+    writeIndicatorState(lastStateActive)
     const app = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'PerseCuaIndicator.app')
     try {
       // Wait for the app itself to exit, including its idle timeout. An ordinary
@@ -268,7 +240,8 @@ export function apply(ctx: { tools: { register: (definition: unknown) => () => v
       const launcher = execFile('open', ['-g', '-W', app, '--args', stateFile], () => {
         if (indicatorProcess !== launcher) return
         indicatorProcess = undefined
-        indicatorLaunched = false // a later action can retry an exit or failure
+        indicatorLaunched = false
+        if (!indicatorClosed && indicatorActivity > launchedAtActivity) launchIndicator()
       })
       indicatorProcess = launcher
     } catch {
@@ -277,6 +250,7 @@ export function apply(ctx: { tools: { register: (definition: unknown) => () => v
   }
   const noteIndicatorActivity = (rawName: string): void => {
     if (indicatorClosed || READ_ONLY_TOOLS.has(rawName)) return
+    indicatorActivity += 1
     launchIndicator()
     if (!indicatorLaunched) return
     // Always claim the first action after idle; throttle only consecutive actives.
@@ -308,75 +282,132 @@ export function apply(ctx: { tools: { register: (definition: unknown) => () => v
     launcher?.kill()
   }
 
-  /**
-   * Driving view: an in-app panel (contributed through the host's `panels`
-   * service, DSH >= ui-panels) showing the driven window's thumbnail plus the
-   * latest action caption — the Codex-style "what is the agent doing" surface,
-   * but in-app, draggable, and per-window instead of full-screen. Optional by
-   * design: hosts without the service keep working untouched.
-   */
-  interface PanelsService {
-    upsert(id: string, patch: { title?: string; caption?: string; image?: string; meta?: Record<string, string> }): void
-    remove(id: string): void
-  }
-  const drivingPanelEnabled = config.drivingPanel ?? bestExperience
-  const panelsService: PanelsService | undefined = (() => {
-    if (!drivingPanelEnabled) return undefined
-    try {
-      const got: unknown = ctx.get('panels')
-      if (got !== null && typeof got === 'object' && 'upsert' in got && 'remove' in got) return got as PanelsService
-    } catch {
-      // host without a panels service: no driving view, everything else works
-    }
-    return undefined
-  })()
-  const PANEL_ID = 'perse-cua/driving'
-  let panelShotAt = 0
-  let panelIdleTimer: ReturnType<typeof setTimeout> | undefined
-  const updateDrivingPanel = async (rawName: string, callArgs: Record<string, unknown>): Promise<void> => {
-    const panels = panelsService
-    if (panels === undefined) return
-    if (panelIdleTimer !== undefined) clearTimeout(panelIdleTimer)
-    panelIdleTimer = setTimeout(() => {
-      panelIdleTimer = undefined
-      panels.remove(PANEL_ID)
-    }, 8000)
-    const pid = typeof callArgs.pid === 'number' ? callArgs.pid : undefined
-    const windowId = typeof callArgs.window_id === 'number' ? callArgs.window_id : undefined
-    const target = pid === undefined ? rawName : windowId === undefined ? `${rawName} (pid ${String(pid)})` : `${rawName} (pid ${String(pid)}, window ${String(windowId)})`
-    const now = Date.now()
-    if (pid === undefined || windowId === undefined || now - panelShotAt < 1000) {
-      panels.upsert(PANEL_ID, { title: 'Computer use', caption: target })
+  const disposedAgents = new WeakSet<Agent>()
+  const stopAgentListener = ctx.on('agent/disposed', ({ agent }) => {
+    disposedAgents.add(agent)
+    for (const id of previews.keys()) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { clearPointTimer(id); previews.delete(id); view.remove(id) }
+    for (const key of snapshots.keys()) if (key.startsWith(`${encodeURIComponent(agent.id)}/`)) snapshots.delete(key)
+    for (const key of captures.keys()) if (key.startsWith(`${encodeURIComponent(agent.id)}/`)) captures.delete(key)
+  })
+  const previews = new Map<string, { item: PreviewWindow; revision: number }>()
+  const snapshots = new Map<string, { pid: number; windowId: number }>()
+  const captures = new Map<string, { pid: number; windowId: number; image: string; width: number; height: number; capturedAt: number; verified: boolean }>()
+  const pointTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  const clearPointTimer = (id: string): void => { const timer = pointTimers.get(id); if (timer !== undefined) clearTimeout(timer); pointTimers.delete(id) }
+  let viewClosed = false
+  let revision = 0
+  view.setDismissHandler(id => { clearPointTimer(id); previews.delete(id) })
+  const observe = (rawName: string, args: Record<string, unknown>, result: McpCallResult, agent: Agent | undefined, working = false, started?: { id: string; revision: number }): { id: string; revision: number } | undefined => {
+    if (!(config.drivingPanel ?? bestExperience) || viewClosed || agent === undefined || disposedAgents.has(agent)) return
+    if (rawName === 'end_session' && !working && result.isError !== true) {
+      const key = `${encodeURIComponent(agent.id)}/${encodeURIComponent(typeof args.session === 'string' ? args.session : '')}/`
+      for (const id of previews.keys()) if (id.startsWith(key)) { clearPointTimer(id); previews.delete(id); view.remove(id) }
+      for (const entry of snapshots.keys()) if (entry.startsWith(key)) snapshots.delete(entry)
+      for (const entry of captures.keys()) if (entry.startsWith(key)) captures.delete(entry)
+      if (typeof args.session === 'string') cursorSessions.delete(args.session)
       return
     }
-    panelShotAt = now
-    try {
-      const shot = await client.callTool('get_window_state', { pid, window_id: windowId, include_screenshot: true, max_dimension: 320 })
-      const image = shot.content.find(block => block.type === 'image')
-      panels.upsert(PANEL_ID, {
-        title: 'Computer use',
-        caption: target,
-        ...(image?.data === undefined ? {} : { image: `data:${image.mimeType ?? 'image/png'};base64,${image.data}` }),
-      })
-    } catch {
-      panels.upsert(PANEL_ID, { title: 'Computer use', caption: target })
+    const session = typeof args.session === 'string' ? args.session : ''
+    const owner = `${encodeURIComponent(agent.id)}/${encodeURIComponent(session)}/`
+    const token = typeof args.element_token === 'string' ? args.element_token.split(':')[0] : undefined
+    const previousSnapshot = token ? snapshots.get(`${owner}${token}`) : undefined
+    const target = args.target !== null && typeof args.target === 'object' ? args.target as Record<string, unknown> : undefined
+    const pid = typeof args.pid === 'number' ? args.pid : target?.kind === 'window' && typeof target.pid === 'number' ? target.pid : previousSnapshot?.pid
+    const windowId = typeof args.window_id === 'number' ? args.window_id : target?.kind === 'window' && typeof target.window_id === 'number' ? target.window_id : previousSnapshot?.windowId
+    if (pid === undefined || windowId === undefined) return
+    const id = `${owner}${pid}/${windowId}`
+    if (started !== undefined && (started.id !== id || previews.get(id)?.revision !== started.revision)) return
+    const old = previews.get(id)?.item
+    const metadata = result.structuredContent !== null && typeof result.structuredContent === 'object' ? result.structuredContent as Record<string, unknown> : {}
+    const app = typeof metadata.app_name === 'string' ? metadata.app_name : ''
+    const tree = result.content.find(block => block.type === 'text')?.text ?? ''
+    const snapshot = typeof metadata.snapshot_id === 'string' ? metadata.snapshot_id : /snapshot_id=([^\s]+)/.exec(tree)?.[1]
+    if (rawName === 'get_window_state' && snapshot && result.isError !== true) {
+      snapshots.set(`${owner}${snapshot}`, { pid, windowId })
+      while (snapshots.size > 128) { const first = snapshots.keys().next().value; if (first === undefined) break; snapshots.delete(first) }
     }
+    const title = typeof metadata.window_title === 'string' ? metadata.window_title : /AXWindow\s+"([^"]+)"/.exec(tree)?.[1] ?? ''
+    const image = rawName === 'get_window_state' ? result.content.find(block => block.type === 'image' && block.data) : undefined
+    const receivedAt = Date.now()
+    if (!working && rawName === 'get_window_state' && result.isError !== true && image?.data && typeof metadata.capture_id === 'string' && typeof metadata.screenshot_width === 'number' && metadata.screenshot_width > 0 && typeof metadata.screenshot_height === 'number' && metadata.screenshot_height > 0) {
+      captures.set(`${owner}${metadata.capture_id}`, { pid, windowId, image: `data:${image.mimeType ?? 'image/png'};base64,${image.data}`, width: metadata.screenshot_width, height: metadata.screenshot_height, capturedAt: receivedAt, verified: false })
+      while (captures.size > 128) { const first = captures.keys().next().value; if (first === undefined) break; captures.delete(first) }
+    }
+    const captured = typeof args.capture_id === 'string' ? captures.get(`${owner}${args.capture_id}`) : undefined
+    const effect = metadata.effect
+    const point = !working && rawName === 'click' && result.isError !== true && (effect === 'confirmed' || effect === 'unverifiable') && captured?.verified === true && captured.pid === pid && captured.windowId === windowId && typeof args.x === 'number' && typeof args.y === 'number' && args.x >= 0 && args.y >= 0 && args.x <= captured.width && args.y <= captured.height ? { x: args.x / captured.width, y: args.y / captured.height } : undefined
+    if (!working && typeof args.capture_id === 'string') captures.delete(`${owner}${args.capture_id}`)
+    const item: PreviewWindow = { id, title: [app, title].filter(Boolean).join(' · ') || old?.title || `Window ${windowId}`, action: rawName, ...(working ? { working: true } : {}), ...(result.isError === true ? { failed: true } : {}), ...(old?.windowUnavailable ? { windowUnavailable: true } : {}), ...(old?.previewUnavailable ? { previewUnavailable: true } : {}), ...(point && captured ? { image: captured.image, capturedAt: captured.capturedAt, point } : old?.image ? { image: old.image, ...(old.capturedAt === undefined ? {} : { capturedAt: old.capturedAt }) } : {}) }
+    clearPointTimer(id)
+    const current = ++revision
+    previews.set(id, { item, revision: current })
+    view.put(item)
+    if (point) {
+      pointTimers.set(id, setTimeout(() => {
+        pointTimers.delete(id)
+        const latest = previews.get(id)
+        if (viewClosed || latest?.revision !== current) return
+        const { point: _point, ...rest } = latest.item
+        latest.item = rest
+        view.put(rest)
+      }, 900))
+    }
+    if (working) return { id, revision: current }
+    if (result.isError === true) return
+    void (async () => {
+      try {
+        const shot = await client.callTool('get_window_state', { ...(session ? { session } : {}), pid, window_id: windowId, include_screenshot: true, include_accessibility_tree: false, display_only: true, max_image_dimension: 0 })
+        const listing = await client.callTool('list_windows', { ...(session ? { session } : {}), pid })
+        const status = windowVisibility(listing, windowId)
+        const latest = previews.get(id)
+        const picture = shot.content.find(block => block.type === 'image' && block.data)
+        if (viewClosed || latest?.revision !== current) return
+        if (status !== 'visible') {
+          const { point: _point, ...rest } = latest.item; clearPointTimer(id)
+          latest.item = { ...rest, ...(status === 'unavailable' ? { windowUnavailable: true } : { previewUnavailable: true }) }
+          for (const entry of captures.values()) if (entry.pid === pid && entry.windowId === windowId) entry.verified = false
+          view.put(latest.item); return
+        }
+        if (typeof metadata.capture_id === 'string') { const candidate = captures.get(`${owner}${metadata.capture_id}`); if (candidate?.pid === pid && candidate.windowId === windowId) candidate.verified = true }
+        if (shot.isError || !picture?.data) { const { point: _point, ...rest } = latest.item; clearPointTimer(id); latest.item = { ...rest, previewUnavailable: true }; view.put(latest.item); return }
+        const shotMetadata = shot.structuredContent !== null && typeof shot.structuredContent === 'object' ? shot.structuredContent as Record<string, unknown> : {}
+        const shotTree = shot.content.find(block => block.type === 'text')?.text ?? ''
+        const shotTitle = typeof shotMetadata.window_title === 'string' ? shotMetadata.window_title : /AXWindow\s+"([^"]+)"/.exec(shotTree)?.[1]
+        const shotApp = typeof shotMetadata.app_name === 'string' ? shotMetadata.app_name : ''
+        clearPointTimer(id)
+        const { previewUnavailable: _unavailable, windowUnavailable: _windowUnavailable, point: _point, ...present } = latest.item
+        latest.item = { ...present, ...(shotTitle ? { title: [shotApp, shotTitle].filter(Boolean).join(' · ') } : {}), image: `data:${picture.mimeType ?? 'image/png'};base64,${picture.data}`, capturedAt: Date.now() }
+        view.put(latest.item)
+      } catch (error) {
+        const latest = previews.get(id)
+        if (!viewClosed && latest?.revision === current) { const { point: _point, ...rest } = latest.item; clearPointTimer(id); latest.item = { ...rest, previewUnavailable: true }; view.put(latest.item); console.warn('[perse-cua] preview capture failed:', error) }
+      }
+    })()
   }
-  const closeDrivingPanel = (): void => {
-    if (panelIdleTimer !== undefined) {
-      clearTimeout(panelIdleTimer)
-      panelIdleTimer = undefined
+  const closeDrivingPanel = (): void => { viewClosed = true; stopAgentListener(); for (const timer of pointTimers.values()) clearTimeout(timer); pointTimers.clear(); previews.clear(); snapshots.clear(); captures.clear(); view.close() }
+
+  const cursorSessions = new Map<string, Promise<void>>()
+  const ensureCursor = (session: string): Promise<void> => {
+    let pending = cursorSessions.get(session)
+    if (pending === undefined) {
+      pending = client.callTool('set_agent_cursor_enabled', { session, enabled: true }).then(result => {
+        if (result.isError) throw new Error('cursor enable was refused')
+      }).catch(error => { cursorSessions.delete(session); console.warn('[perse-cua] cursor unavailable:', error) })
+      cursorSessions.set(session, pending)
     }
-    panelsService?.remove(PANEL_ID)
+    return pending
   }
 
   const boot = async (): Promise<void> => {
     await client.start()
     const advertised = await client.listTools()
+    if (viewClosed) return
     const policy = resolvePolicy()
     const curation = curateTools(advertised.map(tool => tool.name), policy.allow, policy.deny)
     const byName = new Map(advertised.map(tool => [tool.name, tool]))
 
+    if (bestExperience) await enableBestExperienceCursor()
+    if (viewClosed) return
     let before = 0
     let after = 0
     let trimmed = 0
@@ -389,7 +420,7 @@ export function apply(ctx: { tools: { register: (definition: unknown) => () => v
       if (afterBytes < definitionBytes(tool, false)) trimmed += 1
       disposers.push(registerTool(ctx, client, tool, prefix, condense, trimTrees,
         bestExperience ? () => cursorSession : undefined, (name: string) => noteIndicatorActivity(name),
-        (name: string, args: Record<string, unknown>) => { void updateDrivingPanel(name, args) }))
+        observe, bestExperience ? ensureCursor : undefined))
     }
 
     started = true
@@ -403,7 +434,6 @@ export function apply(ctx: { tools: { register: (definition: unknown) => () => v
     }
     if (byName.size === 0) console.log('[perse-cua] cua-driver advertised no tools')
 
-    if (bestExperience) await enableBestExperienceCursor()
     launchIndicator()
   }
 
@@ -432,6 +462,23 @@ export function apply(ctx: { tools: { register: (definition: unknown) => () => v
   }
 }
 
+/** Read only explicit WindowServer visibility, never infer it from the AX tree. */
+function windowVisibility(result: McpCallResult, windowId: number): 'visible' | 'unavailable' | 'unknown' {
+  if (result.isError === true) return 'unknown'
+  const data = result.structuredContent
+  if (data !== null && typeof data === 'object' && Array.isArray((data as { windows?: unknown }).windows)) {
+    const windows = (data as { windows: unknown[] }).windows
+    const entry = windows.find(row => row !== null && typeof row === 'object' && (row as { window_id?: unknown }).window_id === windowId)
+    if (entry === undefined) return 'unavailable'
+    const visible = (entry as { is_on_screen?: unknown }).is_on_screen
+    return visible === true ? 'visible' : visible === false ? 'unavailable' : 'unknown'
+  }
+  const text = result.content.find(block => block.type === 'text')?.text ?? ''
+  if (!/^Found \d+ window\(s\)\./m.test(text)) return 'unknown'
+  const row = text.split('\n').find(line => line.includes(`[window_id: ${String(windowId)}]`))
+  return row === undefined ? 'unavailable' : row.includes('[off-screen]') ? 'unavailable' : 'visible'
+}
+
 /** Tools that manage sessions themselves; never inject a session into them. */
 const SESSION_LIFECYCLE = new Set([
   'start_session', 'end_session', 'get_session', 'list_sessions', 'get_session_state',
@@ -454,7 +501,8 @@ function registerTool(
   trimTrees: boolean,
   cursorFor?: () => string | undefined,
   onCall?: (rawName: string) => void,
-  onExecuted?: (rawName: string, callArgs: Record<string, unknown>) => void,
+  onExecuted?: (rawName: string, callArgs: Record<string, unknown>, result: McpCallResult, agent: Agent | undefined, working?: boolean, started?: { id: string; revision: number }) => { id: string; revision: number } | undefined,
+  ensureCursor?: (session: string) => Promise<void>,
 ): () => void {
   const rawName = tool.name
   const truncated = condense ? condenseDescription(tool.description ?? '', DESCRIPTION_BUDGET) : (tool.description ?? '')
@@ -472,17 +520,24 @@ function registerTool(
       },
     },
     isConcurrencySafe: () => READ_ONLY_TOOLS.has(rawName),
-    async execute(args: unknown): Promise<{ blocks: RenderBlock[] }> {
+    async execute(args: unknown, exec?: { agent?: Agent }): Promise<{ blocks: RenderBlock[] }> {
       onCall?.(rawName)
       let callArgs: Record<string, unknown> = args !== null && typeof args === 'object' ? (args as Record<string, unknown>) : {}
       // Best experience: unlabeled calls would act through the implicit lease, whose
       // cursor nobody enabled. Route them through the cursor session so the overlay
       // animates — Codex-style — while still letting the model override `session`.
       if (cursorFor !== undefined && callArgs.session === undefined && acceptsSession(tool) && !SESSION_LIFECYCLE.has(rawName)) {
-        callArgs = { session: cursorFor(), ...callArgs }
+        const cursorSession = cursorFor()
+        if (cursorSession !== undefined) callArgs = { session: cursorSession, ...callArgs }
       }
-      const result = await client.callTool(rawName, callArgs)
-      if (!READ_ONLY_TOOLS.has(rawName)) onExecuted?.(rawName, callArgs)
+      if (!SESSION_LIFECYCLE.has(rawName) && typeof callArgs.session === 'string') await ensureCursor?.(callArgs.session)
+      const started = onExecuted?.(rawName, callArgs, { content: [] }, exec?.agent, true)
+      let result: McpCallResult
+      try { result = await client.callTool(rawName, callArgs) } catch (error) {
+        onExecuted?.(rawName, callArgs, { content: [], isError: true }, exec?.agent, false, started)
+        throw error
+      }
+      onExecuted?.(rawName, callArgs, result, exec?.agent, false, started)
       const blocks = await project(ctx, result, trimTrees)
       if (result.isError === true) {
         const text = blocks.filter((block): block is { type: 'text'; text: string } => block.type === 'text').map(block => block.text).join('\n')
@@ -529,6 +584,12 @@ async function project(
     blocks.push({ type: 'text', text: `[${block.type} content omitted by perse-cua]` })
   }
 
+  if (result.structuredContent !== null && typeof result.structuredContent === 'object') {
+    const data = result.structuredContent as Record<string, unknown>
+    if (typeof data.capture_id === 'string' && typeof data.screenshot_width === 'number' && typeof data.screenshot_height === 'number') {
+      blocks.push({ type: 'text', text: `Screenshot coordinates: ${JSON.stringify({ capture_id: data.capture_id, width: data.screenshot_width, height: data.screenshot_height })}` })
+    }
+  }
   if (blocks.length === 0) blocks.push({ type: 'text', text: 'cua-driver returned no content' })
   return blocks
 }

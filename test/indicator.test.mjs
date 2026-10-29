@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { setTimeout as pause } from 'node:timers/promises'
 import test from 'node:test'
 import { apply } from '../packages/perse-cua/lib/index.js'
+import { Context } from '@deepseek-ai/cordis'
 
 const fixture = new URL('./fixtures/indicator-process.mjs', import.meta.url)
 const alive = pid => { try { process.kill(pid, 0); return true } catch { return false } }
@@ -33,10 +34,9 @@ function harness(t, settings = {}, config = {}) {
   const ofType = type => events().filter(event => event.type === type)
   const stateFile = path.join(root, 'indicator.json')
   const tools = new Map()
-  const dispose = apply({
-    tools: { register(tool) { tools.set(tool.name, tool); return () => tools.delete(tool.name) } },
-    get() { return undefined },
-  }, {
+  const ctx = new Context()
+  ctx.provide('tools', { register(tool) { tools.set(tool.name, tool); return () => tools.delete(tool.name) } })
+  const dispose = apply(ctx, {
     command: process.execPath, args: [fileURLToPath(fixture), 'mcp', root],
     bestExperience: false, indicator: true, indicatorStateFile: stateFile,
     requestTimeoutMs: 1000, startupTimeoutMs: 1000, ...config,
@@ -60,17 +60,18 @@ function harness(t, settings = {}, config = {}) {
 }
 
 test('indicator recovers on the next action after the idle helper exits', async t => {
-  const h = harness(t)
+  const h = harness(t, { exitBarrier: true })
   await until(() => h.ofType('helper-ready').length === 1, 'initial helper')
   const firstPid = h.ofType('helper-ready')[0].pid
   const state = JSON.parse(readFileSync(h.stateFile, 'utf8'))
   writeFileSync(h.stateFile, JSON.stringify({ ...state, ts: Date.now() / 1000 - 61 }))
-  await until(() => !alive(firstPid), 'expired helper exits')
-  await pause(30) // Deliver the real launcher close event before the next action.
+  await until(() => h.ofType('launcher-waiting').length === 1, 'launcher waits after helper exit')
+  assert.equal(h.ofType('launcher-exit').length, 0, 'action arrives before the launcher exits')
   await h.tools.get('mcp__cua__list_apps').execute({})
   assert.equal(h.ofType('launcher').length, 1, 'read-only calls do not restart the indicator')
   const result = await h.tools.get('mcp__cua__click').execute({})
   assert.equal(result.blocks[0].text, 'fixture tool result')
+  writeFileSync(path.join(h.root, 'release-launcher'), '')
   await until(() => h.ofType('helper-ready').length === 2, 'replacement helper')
   assert.notEqual(h.ofType('helper-ready')[1].pid, firstPid)
   assert.equal(JSON.parse(readFileSync(h.stateFile, 'utf8')).active, true)
