@@ -1,4 +1,4 @@
-node_modules/
+node_modules
 lib/
 dist/
 *.tgz
@@ -7,3 +7,6 @@ dist/
 packages/perse-cua/README.md
 packages/perse-cua/README.zh.md
 packages/perse-cua/LICENSE
+
+# Swift package build products.
+packages/perse-cua/native/.build/

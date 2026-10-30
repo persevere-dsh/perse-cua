@@ -11,17 +11,24 @@
     "typecheck": "tsc -b tsconfig.host.json",
     "build": "npm run typecheck && npm run bundle && node scripts/generate-remote.mjs && node scripts/build-client.mjs && node scripts/build-presenter.mjs",
     "bundle": "tsdown",
+    "build:native": "node scripts/build-native.mjs",
     "pack": "npm run build && npm pack --workspace perse-cua",
     "test": "npm run build && node --test test/*.test.mjs"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
-    "@types/node": "^24.0.0",
-    "tsdown": "^0.22.2",
-    "typescript": "6.0.3",
+    "@deepseek-ai/cordis-plugin-include": "1.0.10",
+    "@deepseek-ai/cordis-plugin-loader": "1.0.6",
+    "@deepseek-ai/dsh-agent": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-app-boot": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-config-editor": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-settings": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-subprocess-local": "0.2.1-rc.2",
     "@deepseek-ai/dsh-typert-generator": "^0.2.1-rc.2",
     "@deepseek-ai/dsh-typert-protocol": "^0.2.1-rc.2",
+    "@types/node": "^24.0.0",
     "react": "^18.2.0",
-    "@deepseek-ai/dsh-agent": "0.2.1-rc.2"
+    "tsdown": "^0.22.2",
+    "typescript": "6.0.3"
   }
 }

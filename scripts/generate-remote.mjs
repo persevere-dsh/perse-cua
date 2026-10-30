@@ -15,10 +15,19 @@ try {
   json(`${stage}/packages/protocol/tsconfig.json`, { extends: '../../tsconfig.base.json', compilerOptions: { rootDir: 'src', outDir: 'lib/types', noEmit: false }, include: ['src/**/*.ts'] })
   mkdirSync(`${stage}/packages/perse-cua`, { recursive: true })
   cpSync('packages/perse-cua/src', `${stage}/packages/perse-cua/src`, { recursive: true })
+  // The native provider has no Remote surface and brings its own host type graph.
+  rmSync(`${stage}/packages/perse-cua/src/native.ts`)
+  writeFileSync(`${stage}/packages/perse-cua/src/native-preview.ts`, 'export function observeNative() { return { hooks: {}, close() {} } }\n')
+  writeFileSync(`${stage}/packages/perse-cua/src/native-mode.ts`, `export const NativeConfigFields = {}; export const resolveNativeConfig = (x: unknown) => x; export const Schema = { object: () => ({}), boolean: () => ({}), string: () => ({}), array: () => ({}), dict: () => ({}), number: () => ({}), union: () => ({}), const: () => ({}) }; export function startNative() {}\n`)
+  const stagedView = `${stage}/packages/perse-cua/src/view.ts`
+  writeFileSync(stagedView, readFileSync(stagedView, 'utf8').replace("import type { SessionId } from '@deepseek-ai/dsh-session'", 'type SessionId = string'))
   const stagedEntry = `${stage}/packages/perse-cua/src/index.ts`
   const entry = readFileSync(stagedEntry, 'utf8').replace("import type { Agent } from '@deepseek-ai/dsh-agent'", 'type Agent = { readonly id: string }')
   writeFileSync(stagedEntry, entry)
-  cpSync('packages/perse-cua/package.json', `${stage}/packages/perse-cua/package.json`)
+  const manifest = JSON.parse(readFileSync('packages/perse-cua/package.json', 'utf8'))
+  delete manifest.exports['./native']
+  delete manifest.exports['./internal-provider']
+  json(`${stage}/packages/perse-cua/package.json`, manifest)
   json(`${stage}/packages/perse-cua/tsconfig.json`, { extends: '../../tsconfig.base.json', compilerOptions: { rootDir: 'src', outDir: 'lib/types', noEmit: false }, include: ['src'], references: [{ path: '../protocol' }] })
   const base = JSON.parse(readFileSync('tsconfig.base.json', 'utf8'))
   base.compilerOptions.lib.push('DOM')

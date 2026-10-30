@@ -19,7 +19,7 @@ test('implicit transport survives idle, plugin reload and another instance witho
   const make = () => {
     const ctx = new Context(); const tools = new Map()
     ctx.provide('tools', { register(tool) { tools.set(tool.name, tool); return () => tools.delete(tool.name) } })
-    const dispose = apply(ctx, { command: process.execPath, args: [fixture, log, expired], indicator: false, drivingPanel: false })
+    const dispose = apply(ctx, { backend: 'mcp', command: process.execPath, args: [fixture, log, expired], indicator: false, drivingPanel: false })
     owners.push(dispose)
     return tools
   }

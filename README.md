@@ -11,6 +11,10 @@ without paying for the parts a session never uses.
 
 -----
 
+On macOS 14 or later the default backend is the experimental DSH native provider. It asks for application consent and requires the host to provide the DSH 0.2.1-rc.2 services. Its preview captures authorized windows after observed operations without changing model screenshot coordinates. The combined native GUI, consent and cursor experience has not been verified. The driver measurements and behavior below apply to `backend: mcp`.
+
+Existing macOS configurations with MCP-specific options such as `command`, `args`, `allow`, or `indicator` must add `backend: mcp`; without it startup reports an error instead of silently selecting the external driver. Profiles with an existing native provider can use `presenterOnly: true` to expose the view service, but automatic native previews require this plugin to own the provider and its authorization lifecycle.
+
 ## What it solves
 
 cua-driver 0.28.1 advertises **56 tools**. Every one of them is attached to *every*
@@ -41,7 +45,7 @@ rendered bytes**. It can never be an automation target — menu items are reache
 3. **Strips the accessibility menu bar** out of rendered trees, leaving the window block
    byte-identical — including the original element numbering, because an `element_token`
    must keep resolving against the snapshot the driver cached.
-4. **Turns on the macOS best experience** by default: at boot the plugin opens a named
+4. **Turns on the macOS MCP best experience** by default: at boot the plugin opens a named
    driver session (default label `perse-cua`) and shows its **agent cursor** — the
    Codex-style effect where you watch a visible cursor do the work in a background
    window while your own mouse, keyboard focus, and frontmost app stay untouched.
@@ -84,6 +88,7 @@ Add a **config override** — not a second `insert`, which would collide on the 
 ```yaml
 - id: perse-cua
   config:
+    backend: mcp
     command: /Users/you/.local/bin/cua-driver
     serverName: cua
 ```
@@ -100,7 +105,8 @@ dsh plugin --profile web add ./perse-cua-0.3.1-rc.1.tgz
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `presenterOnly` | `false` | Provide only the preview service; do not start a driver or register its tools |
+| `presenterOnly` | `false` | Provide only the preview service; do not observe native tool results or start a driver |
+| `backend` | `native` on macOS; `mcp` elsewhere | Select `native` or `mcp`; native requires macOS 14 or later |
 | `command` | `cua-driver` | Driver executable |
 | `args` | `["mcp"]` | Arguments for the driver |
 | `env` | — | Extra environment for the child process |
@@ -122,7 +128,9 @@ silently ignored, so a driver upgrade that renames a tool is visible.
 
 ## Driving previews
 
-The plugin owns the preview service and streams separate window images to its browser client. It identifies targets from window reads and window-targeted actions, and preserves the action session when requesting a preview. Select a card to enlarge it, switch windows, or close a card. The image time is the response receipt time. A brief click indicator appears only when the driver accepts a pixel click bound to the same window, session, and captured image; it is an action marker, while the actual agent cursor is rendered by the driver on the target window and may not appear in window screenshots. Actions without a verified pixel position show no marker. The plugin checks the target window list before publishing a preview; an off-screen or absent window keeps its last image and time and is marked unavailable. If capture or enumeration fails, the card marks the screenshot unavailable; dismiss it when no longer needed. The client clears stale cards and retries an unexpectedly ended preview stream. A preview requires an Agent owner and the host Remote gateway and client slots.
+Native previews refresh after observed operations using the same application authorization. A failed call clears the image and triggers a fresh capture; only a failed preview capture marks the screenshot unavailable. Previews are scoped to the selected Session and the Remote gateway authorizes access to that Session.
+
+With the MCP backend, the plugin streams separate window images to its browser client. It identifies targets from window reads and window-targeted actions, and preserves the action session when requesting a preview. Select a card to enlarge it, switch windows, or close a card. The image time is the response receipt time. A brief click indicator appears only when the driver accepts a pixel click bound to the same window, session, and captured image; it is an action marker, while the actual agent cursor is rendered by the driver on the target window and may not appear in window screenshots. Actions without a verified pixel position show no marker. The plugin checks the target window list before publishing a preview; an off-screen or absent window keeps its last image and time and is marked unavailable. If capture or enumeration fails, the card marks the screenshot unavailable; dismiss it when no longer needed. The client clears stale cards and retries an unexpectedly ended preview stream. A preview requires an Agent owner and the host Remote gateway and client slots.
 
 The exported `PreviewService` can also receive `put` and `remove` calls from a different provider. That provider owns authorization, cursor behavior, and removing its windows.
 
@@ -136,7 +144,7 @@ The `perse-cua/presenter` entry registers only the preview service and never sta
 
 ## Platform notes
 
-- macOS needs Accessibility **and** Screen Recording. Run `cua-driver permissions grant`
+- The MCP backend on macOS needs Accessibility **and** Screen Recording. Run `cua-driver permissions grant`
   once: the driver launches `CuaDriver.app` through LaunchServices so the TCC grant
   attaches to `com.trycua.driver`, not to the harness.
 - Actions run in the background by default and do not steal the user's focus.
@@ -155,6 +163,8 @@ The `perse-cua/presenter` entry registers only the preview service and never sta
   the app and snapshot again.
 
 ## Development
+
+The standalone `perse-cua/native` loader entry also exposes the native provider for a host that manages its own loader row. The helper source README describes build and packaging requirements.
 
 ```sh
 npm ci

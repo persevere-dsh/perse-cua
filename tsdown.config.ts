@@ -29,6 +29,6 @@ export default defineConfig({
   // Runtime peers must stay bare specifiers: the host supplies its own instances
   // (R1 §4.4 hard constraint 2).
   deps: {
-    neverBundle: ['@deepseek-ai/cordis'],
+    neverBundle: ['perse-cua/internal-provider', '@deepseek-ai/cordis', '@deepseek-ai/dsh-computer-use', '@deepseek-ai/dsh-experimental-cua-macos', '@deepseek-ai/schemastery'],
   },
 })

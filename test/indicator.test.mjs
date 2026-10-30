@@ -37,7 +37,7 @@ function harness(t, settings = {}, config = {}) {
   const ctx = new Context()
   ctx.provide('tools', { register(tool) { tools.set(tool.name, tool); return () => tools.delete(tool.name) } })
   const dispose = apply(ctx, {
-    command: process.execPath, args: [fileURLToPath(fixture), 'mcp', root],
+    backend: 'mcp', command: process.execPath, args: [fileURLToPath(fixture), 'mcp', root],
     bestExperience: false, indicator: true, indicatorStateFile: stateFile,
     requestTimeoutMs: 1000, startupTimeoutMs: 1000, ...config,
   })

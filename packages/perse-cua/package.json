@@ -25,13 +25,29 @@
       "default": "./lib/index.js"
     },
     "./client": "./lib/client.js",
+    "./native": {
+      "types": "./lib/types/native.d.ts",
+      "default": "./lib/native.js"
+    },
     "./presenter": {
       "types": "./lib/types/presenter.d.ts",
       "default": "./lib/presenter.js"
+    },
+    "./internal-provider": {
+      "types": "./vendor/dsh-cua-macos.d.ts",
+      "default": "./vendor/dsh-cua-macos.js"
     }
   },
   "files": [
     "lib/index.js",
+    "lib/native.js",
+    "native/bin/**",
+    "native/Sources/**",
+    "native/Package.swift",
+    "native/protocol.schema.json",
+    "native/upstream.json",
+    "native/README.md",
+    "native/LICENSE.*",
     "bin/PerseCuaIndicator.app/**",
     "lib/types/**/*.js",
     "lib/types/**/*.d.ts",
@@ -44,7 +60,8 @@
     "lib/client.js",
     "README.zh.md",
     "LICENSE",
-    "lib/presenter.js"
+    "lib/presenter.js",
+    "vendor/**"
   ],
   "dsh": {
     "bundle": {
@@ -62,7 +79,7 @@
   "scripts": {
     "build": "cd ../.. && npm run build",
     "build:indicator": "bash ../../scripts/build-indicator.sh",
-    "prepack": "node ../../scripts/prepare-package-docs.mjs"
+    "prepack": "cd ../.. && node scripts/verify-native.mjs && node scripts/prepare-package-docs.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
@@ -70,6 +87,13 @@
   },
   "license": "MIT",
   "dependencies": {
-    "zod": "^4.4.3"
+    "@deepseek-ai/dsh-computer-use": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-experimental-cua-macos": "0.2.1-rc.2",
+    "@deepseek-ai/schemastery": "3.18.5",
+    "zod": "^4.6.7",
+    "@deepseek-ai/dsh-cua": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-attachment": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-atomic-write": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-user-questions": "0.2.1-rc.2"
   }
 }

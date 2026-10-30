@@ -37,6 +37,9 @@ import { condenseDescription, trimAxMenuTree } from './trim.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { PreviewService, type PreviewWindow } from './view.ts'
+import { observeNative } from './native-preview.ts'
+import { NativeConfigFields, resolveNativeConfig, Schema, startNative } from './native-mode.ts'
+import type { Config as NativeConfig } from './native.ts'
 export { PreviewService } from './view.ts'
 export type { PreviewWindow } from './view.ts'
 
@@ -46,7 +49,9 @@ export const name = 'perse-cua'
 export const inject = ['tools']
 
 /** Plugin configuration, read from the loader row's `config` block. */
-export interface Config {
+export interface Config extends Partial<NativeConfig> {
+  /** Select the native macOS provider or the external MCP driver explicitly. */
+  backend?: 'native' | 'mcp'
   /** Provide the preview service without starting a driver or registering its tools. */
   presenterOnly?: boolean
   /** cua-driver executable; defaults to `cua-driver` on PATH. */
@@ -99,11 +104,25 @@ export interface Config {
   indicatorStateFile?: string
   /** Show window previews in hosts with the Remote gateway and client slots. */
   drivingPanel?: boolean
+  /** Interval between background native preview refreshes in milliseconds. */
+  previewRefreshIntervalMs?: number
   /** Per-call timeout for driver tool calls, milliseconds. */
   requestTimeoutMs?: number
   /** Time budget for spawning the driver and completing the handshake. */
   startupTimeoutMs?: number
 }
+
+/** Loader schema retains the native provider's root-level application grants. */
+export const Config = Schema.object({
+  ...NativeConfigFields,
+  backend: Schema.union([Schema.const('native'), Schema.const('mcp'), Schema.const(undefined)]),
+  presenterOnly: Schema.boolean(), command: Schema.string(), args: Schema.union([Schema.array(Schema.string()), Schema.const(undefined)]),
+  env: Schema.union([Schema.dict(Schema.string()), Schema.const(undefined)]), serverName: Schema.string(), allow: Schema.union([Schema.array(Schema.string()), Schema.const(undefined)]),
+  deny: Schema.union([Schema.array(Schema.string()), Schema.const(undefined)]), condenseDescriptions: Schema.boolean(), trimMenuTrees: Schema.boolean(),
+  bestExperience: Schema.boolean(), bestExperienceSession: Schema.string(), indicator: Schema.boolean(),
+  indicatorStateFile: Schema.string(), drivingPanel: Schema.boolean(), requestTimeoutMs: Schema.number(),
+  startupTimeoutMs: Schema.number(), previewRefreshIntervalMs: Schema.number().min(1000).max(60000).step(1),
+})
 
 /** Descriptions longer than this are trimmed to their first sentence. */
 const DESCRIPTION_BUDGET = 200
@@ -138,8 +157,24 @@ function definitionBytes(tool: McpTool, condense: boolean): number {
  * @returns a disposer that unregisters every tool and stops the driver.
  */
 export const apply = (ctx: Context & { tools: { register: (definition: unknown) => () => void }; logger?: { info: (message: string) => void } }, config: Config = {}): (() => void) => {
+  const mcpFields = ['command', 'args', 'env', 'serverName', 'allow', 'deny', 'condenseDescriptions', 'trimMenuTrees', 'bestExperience', 'bestExperienceSession', 'indicator', 'indicatorStateFile', 'drivingPanel', 'requestTimeoutMs', 'startupTimeoutMs'] as const
+  const hasMcpFields = mcpFields.some(key => config[key] !== undefined)
+  if (config.presenterOnly !== true && config.backend === 'native' && process.platform !== 'darwin') throw new Error('perse-cua native requires macOS 14 or later')
+  if (config.presenterOnly !== true && process.platform === 'darwin' && config.backend === undefined && hasMcpFields) {
+    throw new Error('perse-cua MCP driver settings require backend: mcp explicitly on macOS')
+  }
+  if (config.presenterOnly !== true && config.backend === 'native' && hasMcpFields) throw new Error('perse-cua native backend cannot use MCP driver settings')
   const view = new PreviewService(ctx)
   if (config.presenterOnly === true) return () => view.close()
+  if (config.backend === 'native' || (process.platform === 'darwin' && config.backend === undefined)) {
+    try {
+      const { allowedApps: _allowedApps, ...rawConfig } = config
+      const nativeConfig = config.allowedApps === undefined ? resolveNativeConfig(rawConfig) : config as NativeConfig
+      const preview = observeNative(ctx, view, { intervalMs: config.previewRefreshIntervalMs })
+      try { startNative(ctx, nativeConfig, preview.hooks) } catch (error) { preview.close(); throw error }
+      return () => { preview.close(); view.close() }
+    } catch (error) { view.close(); throw error }
+  }
   const serverName = config.serverName ?? 'cua'
   const prefix = `mcp__${serverName}__`
   const condense = config.condenseDescriptions !== false
