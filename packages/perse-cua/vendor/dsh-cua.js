@@ -1165,12 +1165,14 @@ function installCua(ctx, config, backend) {
 					if (previous?.disposed) await previous.dispose();
 					signal.throwIfAborted();
 					let client = clients.get(agent);
+					let created = false;
 					if ("appHandle" in request.params && !client) throw new NativeError("APP_ACCESS_REQUIRED", "Select the application with getApp before reading or controlling it");
 					if (!client || client.disposed && !("appHandle" in request.params)) {
 						client = new NativeClient(ctx, native, backend.createChannel, (message) => {
 							ctx.logger.debug(message);
 						});
 						clients.set(agent, client);
+						created = true;
 						owner.coordinates = new CuaCoordinates();
 					}
 					const nativeClient = client;
@@ -1188,7 +1190,7 @@ function installCua(ctx, config, backend) {
 						pending.set(task, agent);
 						try { return await task; } finally { pending.delete(task); if (previewTasks.get(agent)?.task === task) previewTasks.delete(agent); }
 					};
-					backend.onClient?.(agent,
+					if (created) backend.onClient?.(agent,
 						(appHandle, windowId, signal) => previewRequest(appHandle, "screenshot", { windowId, displayOnly: true }, signal),
 						(appHandle, signal) => previewRequest(appHandle, "listWindows", { displayOnly: true }, signal));
 					const dispatch = async (signal) => {

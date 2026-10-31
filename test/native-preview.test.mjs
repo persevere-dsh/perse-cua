@@ -670,3 +670,161 @@ test('action-triggered capture distinguishes timeout from connection-wide permis
   assert.equal(windows.get('auto/first/1').image, undefined); assert.equal(windows.get('auto/second/1').image, undefined)
   preview.close()
 })
+
+test('another agent disposal or tool result does not interrupt an active preview', async () => {
+  for (const action of ['dispose', 'tool-result', 'unwatch-other', 'unwatch-shared']) {
+    const listeners = new Map(), windows = new Map(); let pending
+    const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+    const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+    const preview = observeNative(ctx, view, { intervalMs: 10 }), a = { id: 'a' }, b = { id: 'b' }
+    const emit = (agent, method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+    emit(a, 'getApp', {}, { appHandle: 'app-a', name: 'A' })
+    emit(b, 'getApp', {}, { appHandle: 'app-b', name: 'B' })
+    emit(b, 'screenshot', { appHandle: 'app-b', windowId: 1 }, { windowId: 1, data: 'b2xk', mimeType: 'image/png' })
+    preview.hooks.onClient(b, async (_handle, windowId) => ({ windowId, data: 'bmV3', mimeType: 'image/png' }), (_handle, signal) => new Promise(resolve => { pending = { signal, resolve } }))
+    if (action === 'unwatch-other') view.watch('a', true)
+    view.watch('b', true)
+    if (action === 'unwatch-shared') view.watch('b', true)
+    for (let i = 0; i < 100 && !pending; i++) await new Promise(resolve => setTimeout(resolve, 5))
+    assert.ok(pending)
+    if (action === 'dispose') listeners.get('agent/disposed')({ agent: a })
+    else if (action === 'tool-result') emit(a, 'getState', { appHandle: 'app-a', windowId: 1 }, { windowId: 1, windows: [{ windowId: 1, isOnScreen: true }] })
+    else if (action === 'unwatch-other') view.watch('a', false)
+    else view.watch('b', false)
+    assert.equal(pending.signal.aborted, false, action)
+    pending.resolve([{ windowId: 1, title: 'B', bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }])
+    for (let i = 0; i < 100 && windows.get('b/app-b/1')?.image !== 'data:image/png;base64,bmV3'; i++) await new Promise(resolve => setTimeout(resolve, 5))
+    assert.equal(windows.get('b/app-b/1').image, 'data:image/png;base64,bmV3', action)
+    preview.close()
+  }
+})
+
+test('candidate eligibility is rechecked after another agent list completes', async () => {
+  for (const action of ['unwatch', 'rewatch', 'revoke', 'reauthorize', 'client-replace', 'dismiss']) {
+    const listeners = new Map(), windows = new Map(); let pending, shots = 0, scanA = 0, scansB = 0, shotScans = []
+    const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+    const view = { setDismissHandler(fn) { this.dismiss = fn }, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+    const preview = observeNative(ctx, view, { intervalMs: 10 }), b = { id: 'b' }, a = { id: 'a' }
+    try {
+    const emit = (agent, method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+    emit(b, 'getApp', {}, { appHandle: 'b-app', name: 'B' }); emit(a, 'getApp', {}, { appHandle: 'a-app', name: 'A' })
+    emit(b, 'screenshot', { appHandle: 'b-app', windowId: 1 }, { windowId: 1, data: 'b2xk', mimeType: 'image/png' })
+    const attachB = () => preview.hooks.onClient(b, async (_handle, windowId) => { shots++; shotScans.push(scansB); return { windowId, data: 'bmV3', mimeType: 'image/png' } }, async () => { scansB++; return [{ windowId: 1, title: 'B', bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }] })
+    attachB()
+    preview.hooks.onClient(a, async () => { throw new Error('unexpected A capture') }, (_handle, signal) => { scanA++; return scanA === 1 ? new Promise(resolve => { pending = { signal, resolve } }) : Promise.resolve([]) })
+    view.watch('b', true); view.watch('a', true)
+    for (let i = 0; i < 100 && !pending; i++) await new Promise(resolve => setTimeout(resolve, 5))
+    assert.ok(pending)
+    if (action === 'unwatch' || action === 'rewatch') {
+      view.watch('b', false)
+      if (action === 'rewatch') view.watch('b', true)
+    } else if (action === 'revoke' || action === 'reauthorize') {
+      preview.hooks.onRevoke(b, 'b-app')
+      if (action === 'reauthorize') {
+        emit(b, 'getApp', {}, { appHandle: 'b-app', name: 'B again' }); attachB()
+        emit(b, 'screenshot', { appHandle: 'b-app', windowId: 1 }, { windowId: 1, data: 'b2xk', mimeType: 'image/png' })
+      }
+    } else if (action === 'client-replace') attachB()
+    else { view.dismiss('b/b-app/1'); view.remove('b/b-app/1') }
+    assert.equal(pending.signal.aborted, false, action)
+    pending.resolve([])
+    await new Promise(resolve => setTimeout(resolve, 5))
+    if (action === 'reauthorize') assert.ok(shotScans.every(count => count >= 2), 'old discovery was used for new authorization')
+    else assert.equal(shots, 0, action)
+    if (action === 'unwatch' || action === 'rewatch' || action === 'reauthorize' || action === 'client-replace') {
+      if (action === 'unwatch') view.watch('b', true)
+      for (let i = 0; i < 100 && shots === 0; i++) await new Promise(resolve => setTimeout(resolve, 5))
+      assert.ok(shots > 0, 'resubscribing did not resume capture')
+    } else if (action === 'revoke') assert.equal(windows.has('b/b-app/1'), false)
+    } finally { preview.close() }
+  }
+})
+
+test('late capture errors cannot clear a newer watcher, application, window or client', async () => {
+  for (const change of ['watcher', 'application', 'window', 'client']) {
+    const listeners = new Map(), windows = new Map(); let pending
+    const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+    const view = { setDismissHandler(fn) { this.dismiss = fn }, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+    const preview = observeNative(ctx, view, { intervalMs: 10 }), agent = { id: 'a' }
+    try {
+      const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+      const list = async () => [{ windowId: 1, title: 'Window', bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }]
+      emit('getApp', {}, { appHandle: 'app', name: 'A' })
+      emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'b2xk', mimeType: 'image/png' })
+      preview.hooks.onClient(agent, (_handle, _window, signal) => new Promise((_resolve, reject) => { pending = { signal, reject } }), list)
+      view.watch('a', true)
+      for (let i = 0; i < 100 && !pending; i++) await new Promise(resolve => setTimeout(resolve, 5))
+      assert.ok(pending, change)
+      if (change === 'watcher') { view.watch('a', false); view.watch('a', true) }
+      if (change === 'application') { preview.hooks.onRevoke(agent, 'app'); emit('getApp', {}, { appHandle: 'app', name: 'A again' }) }
+      if (change === 'window') { view.dismiss('a/app/1'); view.remove('a/app/1') }
+      if (change === 'client' || change === 'application') preview.hooks.onClient(agent, async (_handle, windowId) => ({ windowId, data: 'bmV3', mimeType: 'image/png' }), list)
+      if (change !== 'client') emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'bmV3', mimeType: 'image/png' })
+      pending.reject(Object.assign(new Error('old failure'), { code: 'PERMISSION_DENIED' }))
+      await new Promise(resolve => setImmediate(resolve))
+      const current = windows.get('a/app/1')
+      assert.equal(current?.image, change === 'client' ? 'data:image/png;base64,b2xk' : 'data:image/png;base64,bmV3', change)
+      assert.notEqual(current?.previewUnavailable, true, change)
+    } finally { preview.close() }
+  }
+})
+
+test('a replaced client never consumes old discovery success or failure', async () => {
+  for (const result of ['success', 'error']) {
+    const listeners = new Map(), windows = new Map(); let pending, oldCalls = 0, newLists = 0, newShots = 0
+    const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+    const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+    const preview = observeNative(ctx, view, { intervalMs: 20 }), agent = { id: 'a' }
+    try {
+      const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+      const rows = [{ windowId: 1, title: 'Window', bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }]
+      emit('getApp', {}, { appHandle: 'app', name: 'A' })
+      emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'b2xk', mimeType: 'image/png' })
+      preview.hooks.onClient(agent, async () => { oldCalls++; throw new Error('old client capture') }, (_handle, signal) => new Promise((resolve, reject) => { pending = { signal, resolve, reject } }))
+      view.watch('a', true)
+      for (let i = 0; i < 100 && !pending; i++) await new Promise(resolve => setTimeout(resolve, 5))
+      assert.ok(pending)
+      preview.hooks.onClient(agent, async (_handle, windowId) => { newShots++; return { windowId, data: 'bmV3', mimeType: 'image/png' } }, async () => { newLists++; return rows })
+      if (result === 'success') pending.resolve(rows)
+      else pending.reject(Object.assign(new Error('old permission'), { code: 'PERMISSION_DENIED' }))
+      await new Promise(resolve => setTimeout(resolve, 5))
+      assert.equal(oldCalls, 0, result); assert.equal(newShots, 0, result)
+      assert.equal(windows.get('a/app/1')?.image, 'data:image/png;base64,b2xk', result)
+      assert.notEqual(windows.get('a/app/1')?.discoveryUnavailable, true, result)
+      for (let i = 0; i < 100 && newShots === 0; i++) await new Promise(resolve => setTimeout(resolve, 5))
+      assert.ok(newLists > 0 && newShots > 0, result)
+    } finally { preview.close() }
+  }
+})
+
+test('old discovery replies cannot alter a resubscribed or reauthorized application', async () => {
+  for (const change of ['watcher', 'application']) for (const outcome of ['success', 'error']) {
+    const listeners = new Map(), windows = new Map(); let pending, freshLists = 0
+    const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+    const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+    const preview = observeNative(ctx, view, { intervalMs: 20 }), agent = { id: 'a' }
+    try {
+      const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+      const rows = [{ windowId: 1, title: 'New', bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }]
+      emit('getApp', {}, { appHandle: 'app', name: 'A' })
+      emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'b2xk', mimeType: 'image/png' })
+      preview.hooks.onClient(agent, async (_handle, windowId) => ({ windowId, data: 'bmV3', mimeType: 'image/png' }), (_handle, signal) => new Promise((resolve, reject) => { pending = { signal, resolve, reject } }))
+      view.watch('a', true)
+      for (let i = 0; i < 100 && !pending; i++) await new Promise(resolve => setTimeout(resolve, 5))
+      assert.ok(pending)
+      if (change === 'watcher') { view.watch('a', false); view.watch('a', true) }
+      else { preview.hooks.onRevoke(agent, 'app'); emit('getApp', {}, { appHandle: 'app', name: 'A again' }) }
+      preview.hooks.onClient(agent, async (_handle, windowId) => ({ windowId, data: 'bmV3', mimeType: 'image/png' }), async () => { freshLists++; return rows })
+      if (change === 'application') emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'b2xk', mimeType: 'image/png' })
+      if (outcome === 'success') pending.resolve([{ ...rows[0], title: 'Old title' }])
+      else pending.reject(Object.assign(new Error('old permission'), { code: 'PERMISSION_DENIED' }))
+      await new Promise(resolve => setTimeout(resolve, 5))
+      const item = windows.get('a/app/1')
+      assert.equal(item?.image, 'data:image/png;base64,b2xk', `${change} ${outcome}`)
+      assert.notEqual(item?.discoveryUnavailable, true, `${change} ${outcome}`)
+      assert.doesNotMatch(item?.title ?? '', /Old title/, `${change} ${outcome}`)
+      for (let i = 0; i < 100 && freshLists === 0; i++) await new Promise(resolve => setTimeout(resolve, 5))
+      assert.ok(freshLists > 0, `${change} ${outcome}`)
+    } finally { preview.close() }
+  }
+})

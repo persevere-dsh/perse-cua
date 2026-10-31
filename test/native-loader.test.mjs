@@ -494,7 +494,7 @@ test('a native read timing out in the request queue retains its native error cod
   const root = await mkdtemp(join(tmpdir(), 'perse-preview-queue-timeout-'))
   const helper = join(root, 'native-helper.mjs')
   const source = (await readFile(new URL('./fixtures/native-helper.mjs', import.meta.url), 'utf8'))
-    .replace('      let response\n      try {', "      if (request.method === 'listWindows' && request.params.displayOnly) {\n        scopedRecord('slow-start', { id: request.id })\n        setTimeout(() => socket.write(JSON.stringify({ id: request.id, result: call(request.id, request.method, request.params) }) + '\\n'), 1500); return\n      }\n      let response\n      try {")
+    .replace('      let response\n      try {', "      if (request.method === 'listWindows' && request.params.displayOnly) {\n        scopedRecord('slow-start', { id: request.id })\n        setTimeout(() => socket.write(JSON.stringify({ id: request.id, result: call(request.id, request.method, request.params) }) + '\\n'), 3500); return\n      }\n      let response\n      try {")
   await writeFile(helper, source, { mode: 0o700 }); await writeFile(join(root, 'observe-helper'), '')
   const closeHost = await startFixtureHost(helper), ctx = new Context()
   try {
@@ -502,7 +502,7 @@ test('a native read timing out in the request queue retains its native error cod
     ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
     ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] } } })
     ctx.loader.builtins.perse = Main
-    await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper, timeoutMs: 500, graceMs: 2000, previewRefreshIntervalMs: 1000, allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }] } }); await ctx.loader.await()
+    await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper, timeoutMs: 1500, graceMs: 3000, previewRefreshIntervalMs: 1000, allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }] } }); await ctx.loader.await()
     await waitFor(() => ctx.tools.get('cua'))
     const agent = { id: 'queue-timeout', ctx }; ctx.agents.get = id => id === agent.id ? agent : undefined
     let seq = 0
@@ -516,6 +516,7 @@ test('a native read timing out in the request queue retains its native error cod
     const raw = ctx.tools.get('cua').execute({ method: 'getCapabilities', params: {} }, { agent, callId: `timeout-${++seq}`, signal: new AbortController().signal }).catch(error => error)
     const resultPromise = call('getCapabilities', {})
     assert.equal((await raw).code, 'NATIVE_TIMEOUT')
+    assert.equal((await events()).some(row => row.method === 'getCapabilities'), false, 'queue timeout dispatched the read')
     const result = await resultPromise
     assert.equal(result.isError, true)
     assert.match(result.error.message, /^NATIVE_TIMEOUT:/)
@@ -527,7 +528,7 @@ test('queued wait and native dispatch share one request timeout budget', { skip:
   const root = await mkdtemp(join(tmpdir(), 'perse-preview-queue-budget-'))
   const helper = join(root, 'native-helper.mjs')
   const source = (await readFile(new URL('./fixtures/native-helper.mjs', import.meta.url), 'utf8'))
-    .replace('      let response\n      try {', "      if ((request.method === 'listWindows' && request.params.displayOnly) || request.method === 'getCapabilities') {\n        scopedRecord('slow-start', { id: request.id, method: request.method })\n        setTimeout(() => socket.write(JSON.stringify({ id: request.id, result: call(request.id, request.method, request.params) }) + '\\n'), request.method === 'listWindows' ? 300 : 350); return\n      }\n      let response\n      try {")
+    .replace('      let response\n      try {', "      if ((request.method === 'listWindows' && request.params.displayOnly) || request.method === 'getCapabilities') {\n        scopedRecord('slow-start', { id: request.id, method: request.method })\n        setTimeout(() => socket.write(JSON.stringify({ id: request.id, result: call(request.id, request.method, request.params) }) + '\\n'), request.method === 'listWindows' ? 1100 : 1100); return\n      }\n      let response\n      try {")
   await writeFile(helper, source, { mode: 0o700 }); await writeFile(join(root, 'observe-helper'), '')
   const closeHost = await startFixtureHost(helper), ctx = new Context()
   try {
@@ -535,7 +536,7 @@ test('queued wait and native dispatch share one request timeout budget', { skip:
     ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
     ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] } } })
     ctx.loader.builtins.perse = Main
-    await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper, timeoutMs: 500, graceMs: 1000, previewRefreshIntervalMs: 1000, allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }] } }); await ctx.loader.await()
+    await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper, timeoutMs: 1500, graceMs: 2000, previewRefreshIntervalMs: 1000, allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }] } }); await ctx.loader.await()
     await waitFor(() => ctx.tools.get('cua'))
     const agent = { id: 'queue-budget', ctx }; ctx.agents.get = id => id === agent.id ? agent : undefined
     let seq = 0
@@ -691,6 +692,80 @@ test('denying an unselected app clears previews on the connection it invalidates
     assert.equal((await call('getApp', { selector: 'Second' })).isError, true)
     for (let i = 0; i < 40 && latest.length; i++) await delay(5)
     assert.deepEqual(latest, [])
+    controller.abort(); await reader.return(); await consume
+  } finally { await ctx.fiber.dispose(); await closeHost(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('revoking another agent does not cancel an authorized preview in flight', { skip: process.platform !== 'darwin' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'perse-preview-other-revoke-')), helper = join(root, 'native-helper.mjs')
+  const source = (await readFile(new URL('./fixtures/native-helper.mjs', import.meta.url), 'utf8'))
+    .replace("    input.on('line', line => {", "    const delayed = new Map()\n    input.on('line', line => {")
+    .replace("      if (request.type === 'cancel') {", "      if (request.type === 'cancel') {\n        const timer = delayed.get(request.id); if (timer) { clearTimeout(timer); delayed.delete(request.id); scopedRecord('preview-cancelled', { id: request.id }); socket.write(JSON.stringify({ id: request.id, error: { code: 'NATIVE_CANCELLED', message: 'cancelled' } }) + '\\n') }")
+    .replace('      let response\n      try {', "      if (connectionId === 2 && request.method === 'listWindows' && request.params.displayOnly) {\n        scopedRecord('preview-start', { id: request.id }); const timer = setTimeout(() => { delayed.delete(request.id); socket.write(JSON.stringify({ id: request.id, result: call(request.id, request.method, request.params) }) + '\\n') }, 600); delayed.set(request.id, timer); return\n      }\n      let response\n      try {")
+    .replace("      if (!['Fixture', 'test.fixture', '9'].includes(params.selector))", "      if (params.selector === 'Second') { acquired = true; return { ...app, appHandle: `${scope}-second`, name: 'Second', authorization: { id: 'b'.repeat(64), name: 'Second', executablePath: '/fixture/second', persistable: true } } }\n      if (!['Fixture', 'test.fixture', '9'].includes(params.selector))")
+    .replace("    if (!acquired || params.appHandle !== app.appHandle)", "    if (!acquired || ![app.appHandle, `${scope}-second`].includes(params.appHandle))")
+  await writeFile(helper, source, { mode: 0o700 }); await writeFile(join(root, 'observe-helper'), '')
+  const closeHost = await startFixtureHost(helper), ctx = new Context()
+  try {
+    for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess]) await ctx.plugin(plugin)
+    ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
+    ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] } } })
+    ctx.loader.builtins.perse = Main
+    const a = { id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }, b = { id: 'b'.repeat(64), name: 'Second', executablePath: '/fixture/second' }
+    const config = { helperPath: helper, previewRefreshIntervalMs: 1000, timeoutMs: 3000, allowedApps: [a, b] }
+    await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config }); await ctx.loader.await(); await waitFor(() => ctx.tools.get('cua'))
+    const agentA = { id: 'other-a', ctx }, agentB = { id: 'other-b', ctx }; ctx.agents.get = id => id === agentA.id ? agentA : id === agentB.id ? agentB : undefined
+    let seq = 0
+    const call = (agent, method, params) => ctx.tools.execute({ name: 'cua', arguments: { method, params }, agent, callId: `other-revoke-${++seq}`, signal: new AbortController().signal })
+    assert.equal((await call(agentA, 'getApp', { selector: 'Fixture' })).isError, false)
+    assert.equal((await call(agentB, 'getApp', { selector: 'Second' })).isError, false)
+    const controller = new AbortController(), reader = ctx.get('perseCuaView').watch(agentB.id, controller.signal)[Symbol.asyncIterator]()
+    let latest = []; const consume = (async () => { for await (const items of { [Symbol.asyncIterator]: () => reader }) latest = items })()
+    const events = async () => (await readFile(join(root, 'helper-events.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse)
+    for (let i = 0; i < 300 && !(await events()).some(row => row.event === 'preview-start'); i++) await delay(10)
+    assert.ok((await events()).some(row => row.event === 'preview-start'))
+    await ctx.loader.update('perse-cua', { config: { ...config, allowedApps: [b] } }); await ctx.loader.await()
+    await delay(700)
+    assert.equal((await events()).some(row => row.event === 'preview-cancelled'), false, 'revoking agent A interrupted agent B')
+    for (let i = 0; i < 500 && !latest.some(row => row.image); i++) await delay(10)
+    assert.ok(latest.some(row => row.image))
+    for (let i = 0; i < 500 && (await events()).filter(row => row.method === 'screenshot' && row.connection === 2).length < 2; i++) await delay(10)
+    const screenshots = (await events()).filter(row => row.method === 'screenshot' && row.connection === 2)
+    assert.ok(screenshots.length >= 2, 'agent B did not continue refreshing')
+    assert.ok(new Set(screenshots.map(row => row.params.windowId)).size >= 2, 'agent B did not refresh both windows')
+    controller.abort(); await reader.return(); await consume
+  } finally { await ctx.fiber.dispose(); await closeHost(); await rm(root, { recursive: true, force: true }) }
+})
+
+test('same connection read does not hide an in-flight discovery permission failure', { skip: process.platform !== 'darwin' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'perse-preview-same-client-')), helper = join(root, 'native-helper.mjs')
+  const source = (await readFile(new URL('./fixtures/native-helper.mjs', import.meta.url), 'utf8'))
+    .replace('      let response\n      try {', "      if (request.method === 'listWindows' && request.params.displayOnly && existsSync(new URL('./deny-list', import.meta.url))) {\n        scopedRecord('denied-list-start', { id: request.id }); setTimeout(() => socket.write(JSON.stringify({ id: request.id, error: { code: 'PERMISSION_DENIED', message: 'fixture permission denial' } }) + '\\n'), 400); return\n      }\n      let response\n      try {")
+  await writeFile(helper, source, { mode: 0o700 }); await writeFile(join(root, 'observe-helper'), '')
+  const closeHost = await startFixtureHost(helper), ctx = new Context()
+  try {
+    for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess]) await ctx.plugin(plugin)
+    ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
+    ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] } } })
+    ctx.loader.builtins.perse = Main
+    await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper, previewRefreshIntervalMs: 1000, allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }] } }); await ctx.loader.await(); await waitFor(() => ctx.tools.get('cua'))
+    const agent = { id: 'same-client', ctx }; ctx.agents.get = id => id === agent.id ? agent : undefined
+    let seq = 0
+    const call = (method, params) => ctx.tools.execute({ name: 'cua', arguments: { method, params }, agent, callId: `same-client-${++seq}`, signal: new AbortController().signal })
+    assert.equal((await call('getApp', { selector: 'Fixture' })).isError, false)
+    const controller = new AbortController(), reader = ctx.get('perseCuaView').watch(agent.id, controller.signal)[Symbol.asyncIterator]()
+    let latest = []; const consume = (async () => { for await (const items of { [Symbol.asyncIterator]: () => reader }) latest = items })()
+    for (let i = 0; i < 600 && !latest.some(row => row.image); i++) await delay(10)
+    assert.ok(latest.some(row => row.image))
+    await writeFile(join(root, 'deny-list'), '')
+    const events = async () => (await readFile(join(root, 'helper-events.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse)
+    for (let i = 0; i < 400 && !(await events()).some(row => row.event === 'denied-list-start'); i++) await delay(10)
+    assert.ok((await events()).some(row => row.event === 'denied-list-start'))
+    const read = call('getCapabilities', {})
+    assert.equal((await read).isError, false)
+    for (let i = 0; i < 100 && !latest.some(row => row.discoveryUnavailable); i++) await delay(10)
+    assert.ok(latest.some(row => row.discoveryUnavailable), 'same connection permission failure was discarded')
+    assert.ok(latest.every(row => !row.image), 'permission denial did not clear the frame')
     controller.abort(); await reader.return(); await consume
   } finally { await ctx.fiber.dispose(); await closeHost(); await rm(root, { recursive: true, force: true }) }
 })
