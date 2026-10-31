@@ -357,7 +357,7 @@ test('old helpers reject display-only discovery visibly without falling back or 
   for (let i = 0; i < 100 && !scans; i++) await new Promise(resolve => setTimeout(resolve, 5))
   await new Promise(resolve => setTimeout(resolve, 30))
   assert.equal(scans, 1)
-  assert.equal(windows.get('auto/app/status').previewUnavailable, true)
+  assert.equal(windows.get('auto/app/status').discoveryUnavailable, true)
   preview.close()
 })
 
@@ -471,5 +471,109 @@ test('display-only discovery keeps tiny windows, ignores transient and hidden ro
     }
     assert.ok(captures.includes('session-a/first/2'))
     assert.equal(windows.has('session-a/first/3'), false)
+  } finally { preview.close() }
+})
+
+test('discovery failure is isolated to its app and clears after recovery', async () => {
+  const listeners = new Map(), windows = new Map(), counts = { first: 0, second: 0 }, frames = { first: 0, second: 0 }
+  const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+  const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+  const preview = observeNative(ctx, view, { intervalMs: 10 }), agent = { id: 'a' }
+  let failure = false
+  preview.hooks.onClient(agent, async (handle, windowId) => ({ windowId, data: Buffer.from(`${handle}/${++frames[handle]}`).toString('base64'), mimeType: 'image/png' }), async handle => {
+    counts[handle]++
+    if (failure && handle === 'first') throw Object.assign(new Error('unavailable'), { code: 'NATIVE_ERROR' })
+    return (handle === 'first' ? [1, 2] : [1]).map(windowId => ({ windowId, title: `${handle}-${windowId}`, bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }))
+  })
+  const emitApp = handle => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: handle, name: handle } })
+  const until = async predicate => { for (let i = 0; i < 200 && !predicate(); i++) await new Promise(resolve => setTimeout(resolve, 5)); assert.ok(predicate(), 'discovery timed out') }
+  try {
+    emitApp('first'); emitApp('second'); view.watch('a', true)
+    await until(() => windows.get('a/first/1')?.image && windows.get('a/first/2')?.image && windows.get('a/second/1')?.image)
+    const firstImages = [windows.get('a/first/1').image, windows.get('a/first/2').image], secondFrames = frames.second
+    failure = true
+    await until(() => windows.get('a/first/1')?.discoveryUnavailable && windows.get('a/first/2')?.discoveryUnavailable && counts.first >= 5 && frames.second > secondFrames)
+    assert.deepEqual([windows.get('a/first/1').image, windows.get('a/first/2').image], firstImages)
+    assert.equal(windows.has('a/first/status'), false)
+    assert.equal(windows.has('a/second/status'), false)
+    assert.equal(windows.get('a/second/1').discoveryUnavailable, undefined)
+    failure = false
+    await until(() => !windows.get('a/first/1').discoveryUnavailable && !windows.get('a/first/2').discoveryUnavailable)
+  } finally { preview.close() }
+})
+
+test('cancelled discovery after revocation cannot publish a failure or resume', async () => {
+  const listeners = new Map(), windows = new Map(); let pending
+  const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+  const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+  const preview = observeNative(ctx, view, { intervalMs: 10 }), agent = { id: 'a' }
+  preview.hooks.onClient(agent, async () => { throw new Error('unexpected capture') }, (_handle, signal) => new Promise((_resolve, reject) => { pending = { signal, reject } }))
+  listeners.get('tools/result')({ name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: 'app', name: 'Fixture' } })
+  try {
+    view.watch('a', true)
+    for (let i = 0; i < 100 && !pending; i++) await new Promise(resolve => setTimeout(resolve, 5))
+    assert.ok(pending)
+    preview.hooks.onRevoke(agent, 'app'); assert.equal(pending.signal.aborted, true)
+    pending.reject(Object.assign(new Error('late'), { code: 'NATIVE_ERROR' }))
+    await new Promise(resolve => setTimeout(resolve, 40))
+    assert.equal(windows.size, 0)
+  } finally { preview.close() }
+})
+
+test('unrelated reads do not prevent automatic discovery and refresh', async () => {
+  const listeners = new Map(), windows = new Map(); let scans = 0, captures = 0
+  const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+  const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+  const preview = observeNative(ctx, view, { intervalMs: 20 }), agent = { id: 'a' }
+  const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  preview.hooks.onClient(agent, async (_handle, windowId) => ({ windowId, data: Buffer.from(String(++captures)).toString('base64'), mimeType: 'image/png' }), async () => { scans++; return [{ windowId: 1, title: 'One', bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }] })
+  emit('getApp', {}, { appHandle: 'app', name: 'Fixture' }); view.watch('a', true)
+  const timer = setInterval(() => emit('getCapabilities', {}, {}), 5)
+  try {
+    for (let i = 0; i < 200 && captures < 2; i++) await new Promise(resolve => setTimeout(resolve, 5))
+    assert.ok(scans >= 3 && captures >= 2, 'automatic preview did not refresh during unrelated reads')
+    assert.ok(windows.get('a/app/1').image)
+  } finally { clearInterval(timer); preview.close() }
+})
+
+test('a targeted operation cancels an in-flight background frame', async () => {
+  const listeners = new Map(), windows = new Map(); let pending
+  const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+  const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+  const preview = observeNative(ctx, view, { intervalMs: 10 }), agent = { id: 'a' }
+  const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  preview.hooks.onClient(agent, (_handle, windowId, signal) => new Promise(resolve => { pending = { windowId, signal, resolve } }), async () => [{ windowId: 1, title: 'One', bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }])
+  try {
+    emit('getApp', {}, { appHandle: 'app', name: 'Fixture' }); view.watch('a', true)
+    for (let i = 0; i < 100 && !pending; i++) await new Promise(resolve => setTimeout(resolve, 5))
+    assert.ok(pending)
+    emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'bmV3', mimeType: 'image/png' })
+    assert.equal(pending.signal.aborted, true)
+    pending.resolve({ windowId: 1, data: 'b2xk', mimeType: 'image/png' })
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(windows.get('a/app/1').image, 'data:image/png;base64,bmV3')
+  } finally { preview.close() }
+})
+
+test('discovery without windows shows one status until recovery', async () => {
+  const listeners = new Map(), windows = new Map(); let failure = true, scans = 0, statusPuts = 0
+  const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+  const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { if (item.id.endsWith('/status')) statusPuts++; windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+  const preview = observeNative(ctx, view, { intervalMs: 10 }), agent = { id: 'a' }
+  preview.hooks.onClient(agent, async (_handle, windowId) => ({ windowId, data: 'YWJj', mimeType: 'image/png' }), async () => {
+    scans++
+    if (failure) throw Object.assign(new Error('unavailable'), { code: 'NATIVE_ERROR' })
+    return [{ windowId: 1, title: 'One', bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }]
+  })
+  const until = async predicate => { for (let i = 0; i < 200 && !predicate(); i++) await new Promise(resolve => setTimeout(resolve, 5)); assert.ok(predicate(), 'discovery timed out') }
+  try {
+    listeners.get('tools/result')({ name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: 'app', name: 'Fixture' } })
+    view.watch('a', true)
+    await until(() => scans >= 3)
+    assert.equal(statusPuts, 1)
+    assert.equal(windows.get('a/app/status').discoveryUnavailable, true)
+    failure = false
+    await until(() => windows.get('a/app/1')?.image)
+    assert.equal(windows.has('a/app/status'), false)
   } finally { preview.close() }
 })

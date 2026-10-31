@@ -16,6 +16,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
   const appearances = new Map<string, number>()
   const missing = new Map<string, number>()
   const unsupported = new Set<string>()
+  const discoveryStatus = new Set<string>()
   let background: AbortController | undefined
   let refreshTimer: ReturnType<typeof setTimeout> | undefined
   let cursor = 0
@@ -27,12 +28,15 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
   const owners = new Map<Agent, Map<string, { name: string; selected?: number; windows: Map<number, PreviewWindow>; snapshots: Map<string, number>; modelImages: Map<number, { image: string; width: number; height: number }>; observations: Map<number, { width: number; height: number }>; captures: Map<number, { image: string; width: number; height: number }> }>>()
   const idFor = (agent: Agent, handle: string, id: number): string => `${encodeURIComponent(agent.id)}/${encodeURIComponent(handle)}/${id}`
   const disposed = new WeakSet<Agent>()
-  view.setDismissHandler(id => { dismissed.add(id); automatic.delete(id); appearances.delete(id); missing.delete(id); captures.get(id)?.abort(); captures.delete(id); clearPoint(id); for (const apps of owners.values()) for (const app of apps.values()) for (const [window, item] of app.windows) if (item.id === id) app.windows.delete(window) })
+  view.setDismissHandler(id => { dismissed.add(id); discoveryStatus.delete(id); automatic.delete(id); appearances.delete(id); missing.delete(id); captures.get(id)?.abort(); captures.delete(id); clearPoint(id); for (const apps of owners.values()) for (const app of apps.values()) for (const [window, item] of app.windows) if (item.id === id) app.windows.delete(window) })
   const schedule = (abort = false): void => {
-    if (refreshTimer) clearTimeout(refreshTimer)
-    refreshTimer = undefined
     if (abort) background?.abort()
-    if (!closed && !background && watchers.size) refreshTimer = setTimeout(refresh, intervalMs)
+    if (closed || !watchers.size) {
+      if (refreshTimer) clearTimeout(refreshTimer)
+      refreshTimer = undefined
+      return
+    }
+    if (!background && !refreshTimer) refreshTimer = setTimeout(refresh, intervalMs)
   }
   const refresh = async (): Promise<void> => {
     refreshTimer = undefined
@@ -50,13 +54,34 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
           if (unsupported.has(statusId)) continue
           let rows: Awaited<ReturnType<ListWindows>>
           try { rows = await list(handle, controller.signal) } catch (error) {
-            if (record(error)?.code !== 'INVALID_ARGUMENT' || controller.signal.aborted) throw error
-            unsupported.add(statusId)
-            console.warn('[perse-cua] Native helper does not support display-only window discovery; use the helper bundled with this plugin.')
-            if (!dismissed.has(statusId)) view.put({ id: statusId, title: app.name, action: 'getApp', previewUnavailable: true })
+            controller.signal.throwIfAborted()
+            const code = record(error)?.code
+            if (code === 'NATIVE_BUSY' || code === 'NATIVE_CANCELLED') continue
+            if (code === 'INVALID_ARGUMENT') {
+              unsupported.add(statusId)
+              console.warn('[perse-cua] Native helper does not support display-only window discovery; use the helper bundled with this plugin.')
+            } else {
+              console.warn('[perse-cua] Native preview discovery failed:', typeof code === 'string' && /^[A-Z0-9_]{1,64}$/.test(code) ? code : 'UNKNOWN')
+            }
+            if (app.windows.size) {
+              view.remove(statusId); discoveryStatus.delete(statusId)
+              for (const [windowId, item] of app.windows) if (!item.discoveryUnavailable) {
+                const failed = { ...item, discoveryUnavailable: true }
+                app.windows.set(windowId, failed); view.put(failed)
+              }
+            } else if (!dismissed.has(statusId) && !discoveryStatus.has(statusId)) {
+              discoveryStatus.add(statusId)
+              view.put({ id: statusId, title: app.name, action: 'getApp', discoveryUnavailable: true })
+            }
             continue
           }
           controller.signal.throwIfAborted()
+          view.remove(statusId); discoveryStatus.delete(statusId)
+          dismissed.delete(statusId)
+          for (const [windowId, item] of app.windows) if (item.discoveryUnavailable) {
+            const { discoveryUnavailable: _discoveryUnavailable, ...recovered } = item
+            app.windows.set(windowId, recovered); view.put(recovered)
+          }
           const visible = rows.filter(row => row.isOnScreen && row.onCurrentSpace !== false && row.bounds.width > 0 && row.bounds.height > 0)
           const seen = new Set(visible.map(row => row.windowId))
           for (const row of visible) {
@@ -130,7 +155,6 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
   })
   const stop = ctx.on('tools/result', (exec, result) => {
     if (exec.name !== 'cua' || !exec.agent || disposed.has(exec.agent)) return
-    schedule(true)
     const request = record(exec.arguments)
     let rawParams = request?.params
     if (typeof rawParams === 'string') { try { rawParams = JSON.parse(rawParams) } catch { return } }
@@ -146,11 +170,13 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
       if (previous) {
         if (typeof value.name === 'string') previous.name = value.name
       } else apps.set(value.appHandle, { name: typeof value.name === 'string' ? value.name : 'Application', windows: new Map(), snapshots: new Map(), modelImages: new Map(), observations: new Map(), captures: new Map() })
+      schedule()
       return
     }
     if (typeof params.appHandle !== 'string') return
     const handle = params.appHandle, app = apps.get(handle)
     if (!app) return
+    schedule(true)
     const rows = method === 'listWindows' && !result.isError && Array.isArray(result.value) ? result.value : method === 'getState' && Array.isArray(value?.windows) ? value.windows : undefined
     if (rows) {
       const seen = new Set<number>()
@@ -251,7 +277,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
     for (const [id, controller] of captures) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { controller.abort(); captures.delete(id) }
     for (const id of pointTimers.keys()) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) clearPoint(id)
     const apps = owners.get(agent)
-    if (apps) for (const [handle, app] of apps) { const statusId = `${encodeURIComponent(agent.id)}/${encodeURIComponent(handle)}/status`; unsupported.delete(statusId); view.remove(statusId); for (const item of app.windows.values()) view.remove(item.id) }
+    if (apps) for (const [handle, app] of apps) { const statusId = `${encodeURIComponent(agent.id)}/${encodeURIComponent(handle)}/status`; unsupported.delete(statusId); discoveryStatus.delete(statusId); view.remove(statusId); for (const item of app.windows.values()) view.remove(item.id) }
     owners.delete(agent)
   })
   return {
@@ -260,13 +286,13 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
       onRevoke: (agent) => {
         const apps = owners.get(agent)
         if (!apps) return
-        for (const [handle, app] of apps) { const statusId = `${encodeURIComponent(agent.id)}/${encodeURIComponent(handle)}/status`; unsupported.delete(statusId); view.remove(statusId); for (const item of app.windows.values()) {
+        for (const [handle, app] of apps) { const statusId = `${encodeURIComponent(agent.id)}/${encodeURIComponent(handle)}/status`; unsupported.delete(statusId); discoveryStatus.delete(statusId); view.remove(statusId); for (const item of app.windows.values()) {
           captures.get(item.id)?.abort(); captures.delete(item.id); clearPoint(item.id); view.remove(item.id)
         } }
         owners.delete(agent)
         clients.delete(agent); lists.delete(agent); for (const id of dismissed) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { dismissed.delete(id); automatic.delete(id); appearances.delete(id); missing.delete(id) }; for (const id of automatic) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { automatic.delete(id); missing.delete(id) }; for (const id of appearances.keys()) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) appearances.delete(id); schedule(true)
       },
     },
-    close: () => { closed = true; if (refreshTimer) clearTimeout(refreshTimer); background?.abort(); watchers.clear(); lists.clear(); dismissed.clear(); automatic.clear(); appearances.clear(); missing.clear(); unsupported.clear(); stop(); stopAgent(); for (const controller of captures.values()) controller.abort(); captures.clear(); for (const id of pointTimers.keys()) clearPoint(id); clients.clear(); owners.clear() },
+    close: () => { closed = true; if (refreshTimer) clearTimeout(refreshTimer); background?.abort(); watchers.clear(); lists.clear(); dismissed.clear(); automatic.clear(); appearances.clear(); missing.clear(); unsupported.clear(); discoveryStatus.clear(); stop(); stopAgent(); for (const controller of captures.values()) controller.abort(); captures.clear(); for (const id of pointTimers.keys()) clearPoint(id); clients.clear(); owners.clear() },
   }
 }

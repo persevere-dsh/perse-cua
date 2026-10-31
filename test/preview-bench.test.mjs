@@ -27,6 +27,10 @@ test('fixture isolates sessions and controls slow frames, failures and stream en
   fixture.queueFrame('bench/app/1'); fixture.frame('bench/app/1'); fixture.frame('bench/app/1')
   assert.match((await a.next()).value[0].image, /Red:2:/)
   fixture.releaseFrame(); assert.match((await a.next()).value[0].image, /Red:2:/)
+  const lastImage = fixture.snapshot()[0].image
+  fixture.status('bench/app/1', 'discovery'); const unavailable = (await a.next()).value[0]
+  assert.equal(unavailable.image, lastImage); assert.equal(unavailable.discoveryUnavailable, true)
+  fixture.status('bench/app/1', 'discovery-empty'); assert.equal((await a.next()).value[0].image, undefined)
   fixture.status('bench/app/1', 'failed'); assert.equal((await a.next()).value[0].image, undefined)
   fixture.status('bench/app/1', 'offscreen'); assert.equal((await a.next()).value[0].windowUnavailable, true)
   const done = a.next(); fixture.disconnect('bench'); assert.equal((await done).done, true)

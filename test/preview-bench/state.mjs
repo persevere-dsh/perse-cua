@@ -15,7 +15,7 @@ export function createPreviewFixture(makeImage) {
     queueFrame(id) { const item = (items.get(id.split('/')[0]) ?? []).find(row => row.id === id); delayed = item && { id, frame: item.frame + 1 } },
     releaseFrame() { if (delayed) { const { id, frame } = delayed; delayed = undefined; update(id, item => frame > item.frame ? { ...item, frame } : item) } },
     resize(id) { update(id, item => ({ ...item, size: (item.size + 1) % sizes.length })) },
-    status(id, status) { update(id, item => ({ ...item, previewUnavailable: status === 'failed', windowUnavailable: status === 'offscreen' || status === 'offscreen-empty', noImage: status === 'offscreen-empty' || status === 'waiting' })) },
+    status(id, status) { update(id, item => ({ ...item, previewUnavailable: status === 'failed' || status === 'failed-discovery', windowUnavailable: status === 'offscreen' || status === 'offscreen-empty' || status === 'offscreen-discovery', discoveryUnavailable: status === 'discovery' || status === 'discovery-empty' || status === 'offscreen-discovery' || status === 'failed-discovery', noImage: status === 'offscreen-empty' || status === 'waiting' || status === 'discovery-empty' })) },
     addFourth() { if (!items.get('bench').some(item => item.id === 'bench/app/4')) { items.get('bench').push({ id: 'bench/app/4', title: 'Yellow', action: 'getState', frame: 0, size: 0, failed: false }); emit('bench') } },
     setFailure(value) { rejectDismiss = value },
     reset() { items.set('bench', initial('bench')); items.set('other', initial('other')); delayed = undefined; emit('bench'); emit('other') },

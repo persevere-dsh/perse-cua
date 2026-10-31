@@ -56,3 +56,15 @@ private func target(_ x: Double) -> AXClickVisualTarget {
     } catch { #expect((error as? NativeFailure)?.code == "NATIVE_ERROR") }
     #expect(!marked)
 }
+
+@Test @MainActor func axClickMarksPreActionPositionWithoutReadingAfterDispatch() async throws {
+    for disappears in [false, true] {
+        var current: AXClickVisualTarget? = target(100)
+        var events: [String] = []
+        try await performAXClick(resolve: { events.append("resolve"); return current },
+            plan: { _, _ in }, checkCancellation: {},
+            perform: { events.append("action"); current = disappears ? nil : target(200) },
+            mark: { _, point in events.append("mark:\(point.x)") })
+        #expect(events == ["resolve", "resolve", "action", "mark:110.0"])
+    }
+}

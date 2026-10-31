@@ -296,3 +296,19 @@ test('preview streams and dismissal are restricted to the addressed session', as
   assert.deepEqual((await next.next()).value.map(item => item.title), ['B'])
   view.close(); await a.return(); await b.return(); await next.return()
 })
+
+test('removing an absent status does not publish a duplicate snapshot', async () => {
+  const { PreviewService } = await import('../packages/perse-cua/lib/index.js')
+  const view = new PreviewService(new Context())
+  const reader = view.watch('a', new AbortController().signal)[Symbol.asyncIterator]()
+  try {
+    assert.deepEqual((await reader.next()).value, [])
+    const pending = reader.next()
+    for (let i = 0; i < 3; i++) view.remove('a/app/status')
+    assert.equal(await Promise.race([pending.then(() => 'published'), new Promise(resolve => setImmediate(() => resolve('quiet')))]), 'quiet')
+    view.put({ id: 'a/app/status', title: 'App', action: 'getApp', discoveryUnavailable: true })
+    assert.equal((await pending).value[0].discoveryUnavailable, true)
+    const removed = reader.next(); view.remove('a/app/status')
+    assert.deepEqual((await removed).value, [])
+  } finally { view.close(); await reader.return() }
+})

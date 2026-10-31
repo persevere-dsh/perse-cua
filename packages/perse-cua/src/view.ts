@@ -12,6 +12,8 @@ export interface PreviewWindow {
   failed?: boolean
   working?: boolean
   previewUnavailable?: boolean
+  /** Window discovery failed for the application. */
+  discoveryUnavailable?: boolean
   /** The target was absent or off-screen in the latest window enumeration. */
   windowUnavailable?: boolean
   /** Action point normalized to the image on this item. */
