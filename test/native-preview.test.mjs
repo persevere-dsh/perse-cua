@@ -577,3 +577,96 @@ test('discovery without windows shows one status until recovery', async () => {
     assert.equal(windows.has('a/app/status'), false)
   } finally { preview.close() }
 })
+
+test('background screenshot timeout keeps the last frame with a warning until recovery or revocation', async () => {
+  const listeners = new Map(), windows = new Map(); let mode = 'success', count = 0, rejectPending
+  const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+  const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+  const preview = observeNative(ctx, view, { intervalMs: 10 }), agent = { id: 'auto' }
+  preview.hooks.onClient(agent, async (_handle, windowId) => {
+    count++
+    if (mode === 'timeout') throw Object.assign(new Error('timed out'), { code: 'NATIVE_TIMEOUT' })
+    if (mode === 'pending') return new Promise((_resolve, reject) => { rejectPending = reject })
+    return { windowId, data: mode === 'recovered' ? 'bmV3' : 'b2xk', mimeType: 'image/png' }
+  }, async () => [{ windowId: 1, title: 'One', bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }])
+  listeners.get('tools/result')({ name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: 'app', name: 'Fixture' } })
+  view.watch('auto', true)
+  for (let i = 0; i < 200 && !windows.get('auto/app/1')?.image; i++) await new Promise(resolve => setTimeout(resolve, 5))
+  const initial = windows.get('auto/app/1'); assert.equal(initial.image, 'data:image/png;base64,b2xk')
+  mode = 'timeout'
+  for (let i = 0; i < 200 && !windows.get('auto/app/1')?.previewUnavailable; i++) await new Promise(resolve => setTimeout(resolve, 5))
+  const timedOut = windows.get('auto/app/1'); assert.equal(timedOut.image, initial.image); assert.equal(timedOut.capturedAt, initial.capturedAt)
+  mode = 'recovered'
+  for (let i = 0; i < 200 && windows.get('auto/app/1')?.previewUnavailable; i++) await new Promise(resolve => setTimeout(resolve, 5))
+  assert.equal(windows.get('auto/app/1').image, 'data:image/png;base64,bmV3')
+  mode = 'pending'
+  for (let i = 0; i < 200 && !rejectPending; i++) await new Promise(resolve => setTimeout(resolve, 5))
+  assert.ok(rejectPending); preview.hooks.onRevoke(agent, 'app')
+  rejectPending(Object.assign(new Error('timed out'), { code: 'NATIVE_TIMEOUT' }))
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(windows.size, 0); assert.ok(count >= 4)
+  preview.close()
+})
+
+test('screenshot permission denial and lost application handles clear the retained frame', async () => {
+  for (const code of ['PERMISSION_DENIED', 'STALE_APP', 'NATIVE_CLOSED']) {
+    const listeners = new Map(), windows = new Map(); let failure
+    const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+    const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+    const preview = observeNative(ctx, view, { intervalMs: 10 }), agent = { id: 'auto' }
+    preview.hooks.onClient(agent, async (_handle, windowId) => {
+      if (failure) throw Object.assign(new Error('unavailable'), { code: failure })
+      return { windowId, data: 'b2xk', mimeType: 'image/png' }
+    }, async () => [{ windowId: 1, title: 'One', bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }])
+    listeners.get('tools/result')({ name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: 'app', name: 'Fixture' } })
+    view.watch('auto', true)
+    for (let i = 0; i < 200 && !windows.get('auto/app/1')?.image; i++) await new Promise(resolve => setTimeout(resolve, 5))
+    assert.ok(windows.get('auto/app/1')?.image, code); failure = code
+    for (let i = 0; i < 200 && !windows.get('auto/app/1')?.previewUnavailable; i++) await new Promise(resolve => setTimeout(resolve, 5))
+    assert.equal(windows.get('auto/app/1').image, undefined, code)
+    assert.equal(windows.get('auto/app/1').capturedAt, undefined, code)
+    preview.close()
+  }
+})
+
+test('connection failures during window discovery clear every application on that connection', async () => {
+  for (const code of ['PERMISSION_DENIED', 'NATIVE_CLOSED', 'NATIVE_DISPOSED', 'NATIVE_CLEANUP', 'NATIVE_IO', 'NATIVE_EOF', 'NATIVE_EXITED', 'NATIVE_PROTOCOL', 'NATIVE_RESPONSE_LIMIT']) {
+    const listeners = new Map(), windows = new Map(); let failed = false
+    const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+    const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+    const preview = observeNative(ctx, view, { intervalMs: 10 }), agent = { id: 'auto' }
+    preview.hooks.onClient(agent, async () => { throw new Error('unexpected screenshot') }, async () => { failed = true; throw Object.assign(new Error('connection lost'), { code }) })
+    const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+    for (const appHandle of ['first', 'second']) {
+      emit('getApp', {}, { appHandle, name: appHandle })
+      emit('screenshot', { appHandle, windowId: 1 }, { windowId: 1, data: 'YWJj', mimeType: 'image/png' })
+    }
+    assert.ok(windows.get('auto/first/1')?.image); assert.ok(windows.get('auto/second/1')?.image)
+    view.watch('auto', true)
+    for (let i = 0; i < 100 && !failed; i++) await new Promise(resolve => setTimeout(resolve, 5))
+    for (const appHandle of ['first', 'second']) {
+      const item = windows.get(`auto/${appHandle}/1`)
+      assert.equal(item.image, undefined, `${code} ${appHandle}`); assert.equal(item.discoveryUnavailable, true, `${code} ${appHandle}`)
+    }
+    preview.close()
+  }
+})
+
+test('action-triggered capture distinguishes timeout from connection-wide permission loss', async () => {
+  const listeners = new Map(), windows = new Map(); let failure = 'NATIVE_TIMEOUT'
+  const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+  const view = { setDismissHandler() {}, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+  const preview = observeNative(ctx, view), agent = { id: 'auto' }
+  preview.hooks.onClient(agent, async () => { throw Object.assign(new Error('capture failed'), { code: failure }) })
+  const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  for (const appHandle of ['first', 'second']) {
+    emit('getApp', {}, { appHandle, name: appHandle })
+    emit('screenshot', { appHandle, windowId: 1 }, { windowId: 1, data: 'YWJj', mimeType: 'image/png' })
+  }
+  emit('click', { appHandle: 'first', windowId: 1 }, { dispatched: true }); await new Promise(resolve => setImmediate(resolve))
+  assert.ok(windows.get('auto/first/1').image); assert.equal(windows.get('auto/first/1').previewUnavailable, true)
+  assert.ok(windows.get('auto/second/1').image)
+  failure = 'PERMISSION_DENIED'
+  emit('click', { appHandle: 'first', windowId: 1 }, { dispatched: true }); await new Promise(resolve => setImmediate(resolve))
+  assert.equal(windows.get('auto/first/1').image, undefined); assert.equal(windows.get('auto/second/1').image, undefined)
+  preview.close()
+})

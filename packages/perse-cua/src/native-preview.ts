@@ -6,6 +6,10 @@ import type { Capture, Hooks, ListWindows } from 'perse-cua/internal-provider'
 type RecordValue = Record<string, unknown>
 const record = (value: unknown): RecordValue | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as RecordValue : undefined
 
+const connectionFailures = new Set(['PERMISSION_DENIED', 'NATIVE_CLOSED', 'NATIVE_DISPOSED', 'NATIVE_CLEANUP', 'NATIVE_IO', 'NATIVE_EOF', 'NATIVE_EXITED', 'NATIVE_PROTOCOL', 'NATIVE_RESPONSE_LIMIT'])
+const failureKind = (code: unknown): 'connection' | 'application' | 'timeout' | 'other' =>
+  typeof code === 'string' && connectionFailures.has(code) ? 'connection' : code === 'STALE_APP' ? 'application' : code === 'NATIVE_TIMEOUT' ? 'timeout' : 'other'
+
 /** Project native tool outcomes to per-agent, per-window previews. */
 export function observeNative(ctx: Context, view: PreviewService, options: { intervalMs?: number | undefined } = {}): { hooks: Hooks; close: () => void } {
   const clients = new Map<Agent, Capture>()
@@ -28,6 +32,21 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
   const owners = new Map<Agent, Map<string, { name: string; selected?: number; windows: Map<number, PreviewWindow>; snapshots: Map<string, number>; modelImages: Map<number, { image: string; width: number; height: number }>; observations: Map<number, { width: number; height: number }>; captures: Map<number, { image: string; width: number; height: number }> }>>()
   const idFor = (agent: Agent, handle: string, id: number): string => `${encodeURIComponent(agent.id)}/${encodeURIComponent(handle)}/${id}`
   const disposed = new WeakSet<Agent>()
+  const invalidateFrames = (agent: Agent, handle: string, scope: 'application' | 'connection', reason: 'discoveryUnavailable' | 'previewUnavailable'): void => {
+    const apps = owners.get(agent)
+    if (!apps) return
+    for (const [appHandle, app] of apps) {
+      if (scope === 'application' && appHandle !== handle) continue
+      app.captures.clear(); app.modelImages.clear()
+      for (const [windowId, item] of app.windows) {
+        captures.get(item.id)?.abort(); captures.delete(item.id); clearPoint(item.id)
+        const { image: _image, capturedAt: _capturedAt, point: _point, ...rest } = item
+        if (!item[reason] || item.image || item.capturedAt || item.point) {
+          const failed = { ...rest, [reason]: true }; app.windows.set(windowId, failed); view.put(failed)
+        }
+      }
+    }
+  }
   view.setDismissHandler(id => { dismissed.add(id); discoveryStatus.delete(id); automatic.delete(id); appearances.delete(id); missing.delete(id); captures.get(id)?.abort(); captures.delete(id); clearPoint(id); for (const apps of owners.values()) for (const app of apps.values()) for (const [window, item] of app.windows) if (item.id === id) app.windows.delete(window) })
   const schedule = (abort = false): void => {
     if (abort) background?.abort()
@@ -63,11 +82,12 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
             } else {
               console.warn('[perse-cua] Native preview discovery failed:', typeof code === 'string' && /^[A-Z0-9_]{1,64}$/.test(code) ? code : 'UNKNOWN')
             }
+            const kind = failureKind(code)
+            if (kind === 'connection' || kind === 'application') invalidateFrames(agent, handle, kind, 'discoveryUnavailable')
             if (app.windows.size) {
               view.remove(statusId); discoveryStatus.delete(statusId)
-              for (const [windowId, item] of app.windows) if (!item.discoveryUnavailable) {
-                const failed = { ...item, discoveryUnavailable: true }
-                app.windows.set(windowId, failed); view.put(failed)
+              if (kind !== 'connection' && kind !== 'application') for (const [windowId, item] of app.windows) if (!item.discoveryUnavailable) {
+                const failed = { ...item, discoveryUnavailable: true }; app.windows.set(windowId, failed); view.put(failed)
               }
             } else if (!dismissed.has(statusId) && !discoveryStatus.has(statusId)) {
               discoveryStatus.add(statusId)
@@ -140,9 +160,14 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
           const app = current && owners.get(current.agent)?.get(current.handle)
           const old = current && app?.windows.get(current.window)
           if (old && app && current) {
-            const { image: _image, capturedAt: _capturedAt, point: _point, ...rest } = old
-            clearPoint(old.id); app.captures.delete(current.window)
-            const item = { ...rest, previewUnavailable: true }; app.windows.set(current.window, item); view.put(item)
+            const kind = failureKind(code)
+            if (kind === 'connection' || kind === 'application') invalidateFrames(current.agent, current.handle, kind, 'previewUnavailable')
+            else {
+              const { point: _point, ...withoutPoint } = old
+              const { image: _image, capturedAt: _capturedAt, ...withoutImage } = withoutPoint
+              clearPoint(old.id); app.captures.delete(current.window)
+              const item = { ...(kind === 'timeout' ? withoutPoint : withoutImage), previewUnavailable: true }; app.windows.set(current.window, item); view.put(item)
+            }
           }
         }
       }
@@ -265,10 +290,15 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
       if (!latest) return
       const code = record(error)?.code
       console.warn('[perse-cua] Native preview capture failed:', typeof code === 'string' && /^[A-Z0-9_]{1,64}$/.test(code) ? code : 'UNKNOWN')
-      clearPoint(id)
-      const { image: _image, capturedAt: _capturedAt, point: _point, ...rest } = latest
-      const next = { ...rest, previewUnavailable: true }
-      app.windows.set(selected, next); view.put(next)
+      const kind = failureKind(code)
+      if (kind === 'connection' || kind === 'application') invalidateFrames(agent, handle, kind, 'previewUnavailable')
+      else {
+        clearPoint(id); app.captures.delete(selected)
+        const { point: _point, ...withoutPoint } = latest
+        const { image: _image, capturedAt: _capturedAt, ...withoutImage } = withoutPoint
+        const next = { ...(kind === 'timeout' ? withoutPoint : withoutImage), previewUnavailable: true }
+        app.windows.set(selected, next); view.put(next)
+      }
     }).finally(() => { if (captures.get(id) === controller) captures.delete(id) })
   })
   const stopAgent = ctx.on('agent/disposed', ({ agent }) => {

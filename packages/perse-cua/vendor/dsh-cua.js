@@ -1,3 +1,4 @@
+import { NativeRequestArbiter } from "./native-request-arbiter.js";
 import { join } from "node:path";
 import { Buffer as Buffer$1 } from "node:buffer";
 import { tmpdir } from "node:os";
@@ -95,7 +96,7 @@ var NativeClient = class {
 	* @param callId - Logged tool invocation ID, when this request belongs to a tool execution.
 	* @returns The validated helper result, after failure cleanup when needed.
 	*/
-	async request(method, params, signal, callId) {
+	async request(method, params, signal, callId, remainingMs) {
 		if (signal.aborted) throw new NativeError("NATIVE_CANCELLED", "Operation was cancelled before dispatch");
 		if (this.disposed) {
 			await this.dispose();
@@ -152,7 +153,7 @@ var NativeClient = class {
 			interrupt(new NativeError("NATIVE_CANCELLED", "Operation cancelled; inspect fresh state before retrying input"));
 		};
 		signal.addEventListener("abort", abort, { once: true });
-		const timeoutMs = capture ? Math.min(this.config.timeoutMs, this.config.screenshotTimeoutMs) : this.config.timeoutMs;
+		const timeoutMs = Math.min(capture ? Math.min(this.config.timeoutMs, this.config.screenshotTimeoutMs) : this.config.timeoutMs, remainingMs ?? Infinity);
 		const timer = setTimeout(() => {
 			interrupt(new NativeError("NATIVE_TIMEOUT", `Operation exceeded ${timeoutMs}ms`));
 		}, timeoutMs);
@@ -487,7 +488,6 @@ var ApplicationAccess = class {
 	invalidate(id, agent) {
 		const clients = /* @__PURE__ */ new Set();
 		for (const [client, state] of this.clients) for (const [handle, selection] of state.handles) if (selection.identity.id === id && (agent === void 0 || state.agent === agent)) {
-			this.options.onInvalidate?.(state.agent, handle);
 			selection.lifetime.abort(new NativeError("APP_ACCESS_REVOKED", "Application access was revoked; stop using this application"));
 			this.reject(state.agent, selection.identity);
 			clients.add(client);
@@ -497,7 +497,12 @@ var ApplicationAccess = class {
 			operation.controller.abort(this.denied(operation.identity));
 			clients.add(operation.client);
 		}
-		for (const client of clients) client.invalidate();
+		for (const client of clients) {
+			const state = this.clients.get(client);
+			const handle = state?.handles.keys().next().value;
+			if (state && handle !== void 0) this.options.onInvalidate?.(state.agent, handle);
+			client.invalidate();
+		}
 	}
 	reconcile() {
 		for (const state of this.clients.values()) for (const selection of state.handles.values()) if (!selection.lifetime.signal.aborted && !this.permitted(selection)) this.invalidate(selection.identity.id);
@@ -989,19 +994,29 @@ function installCua(ctx, config, backend) {
 	const clients = /* @__PURE__ */ new Map();
 	const lifetime = new AbortController();
 	const pending = /* @__PURE__ */ new Map();
+	const dispatchNative = (arbiter, client, kind, method, params, signal, callId, preempt = false) => {
+		const budget = method === "screenshot" ? Math.min(config.timeoutMs, config.screenshotTimeoutMs) : config.timeoutMs;
+		const start = performance.now();
+		return arbiter.run(kind, signal, (queuedSignal) => {
+			const remaining = budget - (performance.now() - start);
+			if (remaining <= 0) throw new NativeError(kind === "preview" ? "NATIVE_BUSY" : "NATIVE_TIMEOUT", "Native request timed out before dispatch");
+			return client.request(method, params, queuedSignal, callId, remaining);
+		}, { preempt, waitMs: budget });
+	};
 	const ownerCleanups = /* @__PURE__ */ new Map();
 	const previewTasks = new Map();
-	const busyOwners = new Map();
 	const closedOwners = /* @__PURE__ */ new WeakSet();
 	function ownerFor(agent) {
 		if (closedOwners.has(agent) || ctx.agents.get(agent.id) !== agent) throw new Error("dsh-cua agent has been disposed");
 		const existing = ownerCleanups.get(agent);
 		if (existing) return existing;
 		const controller = new AbortController();
+		const arbiter = new NativeRequestArbiter((code, message) => new NativeError(code, message));
 		let closing;
 		const close = () => {
 			closedOwners.add(agent);
 			controller.abort();
+			arbiter.close();
 			return closing ??= Promise.resolve().then(async () => {
 				try {
 					await clients.get(agent)?.dispose();
@@ -1014,6 +1029,7 @@ function installCua(ctx, config, backend) {
 			});
 		};
 		const owner = {
+			arbiter,
 			close,
 			release: agent.ctx.effect(() => close, "dsh-cua.agent"),
 			signal: controller.signal,
@@ -1064,7 +1080,7 @@ function installCua(ctx, config, backend) {
 				durationMs: config.dragDurationMs,
 				steps: config.dragSteps
 			} : params;
-			const requestNative = () => client.request(method, nativeParams, signal, execution.callId);
+			const requestNative = () => dispatchNative(execution.arbiter, client, "foreground", method, nativeParams, signal, execution.callId, !["getCapabilities", "listApps", "findApps"].includes(method));
 			if (method === "screenshot") {
 				const { attachments, target } = await screenshotStore(ctx, execution);
 				const screenshot = NativeScreenshotResult.parse(await requestNative());
@@ -1099,7 +1115,10 @@ function installCua(ctx, config, backend) {
 				const { authorization } = z.object({ authorization: ApplicationAuthorizationResult }).parse(result);
 				await access.select(agent, client, prepared.appHandle, authorization, signal);
 				signal.throwIfAborted();
-				const selected = prepared.pid === null ? AppResult.parse(await access.run(client, prepared.appHandle, signal, (signal) => client.request("launchApp", { appHandle: prepared.appHandle }, signal, execution.callId))) : AppResult.parse(prepared);
+				let selected;
+				if (prepared.pid === null) {
+					selected = AppResult.parse(await access.run(client, prepared.appHandle, signal, (signal) => dispatchNative(execution.arbiter, client, "foreground", "launchApp", { appHandle: prepared.appHandle }, signal, execution.callId, true)));
+				} else selected = AppResult.parse(prepared);
 				if (selected.appHandle !== prepared.appHandle) throw new NativeError("NATIVE_PROTOCOL", "Launched application has another handle");
 				return selected;
 			}
@@ -1140,14 +1159,7 @@ function installCua(ctx, config, backend) {
 				execution.signal.throwIfAborted();
 				lifetime.signal.throwIfAborted();
 				const owner = ownerFor(agent);
-				busyOwners.set(agent, (busyOwners.get(agent) ?? 0) + 1);
-				const previousPreview = previewTasks.get(agent);
-				if (previousPreview) { previousPreview.controller.abort(); await Promise.allSettled([previousPreview.task]); }
-				const signal = AbortSignal.any([
-					execution.signal,
-					lifetime.signal,
-					owner.signal
-				]);
+				const signal = AbortSignal.any([execution.signal, lifetime.signal, owner.signal]);
 				const operation = (async () => {
 					const previous = clients.get(agent);
 					if (previous?.disposed) await previous.dispose();
@@ -1163,12 +1175,12 @@ function installCua(ctx, config, backend) {
 					}
 					const nativeClient = client;
 					const previewRequest = async (appHandle, method, params, previewSignal) => {
-						if (busyOwners.has(agent) || previewTasks.has(agent)) throw new NativeError("NATIVE_BUSY", "Native preview is busy");
+						if (previewTasks.has(agent)) throw new NativeError("NATIVE_BUSY", "Native preview is busy");
 						const controller = new AbortController();
 						const signal = AbortSignal.any([previewSignal, controller.signal, lifetime.signal, owner.signal]);
 						signal.throwIfAborted();
 						const task = access.run(nativeClient, appHandle, signal, async (authorizedSignal) => {
-							const result = await nativeClient.request(method, { appHandle, ...params }, authorizedSignal);
+							const result = await dispatchNative(owner.arbiter, nativeClient, "preview", method, { appHandle, ...params }, authorizedSignal);
 							authorizedSignal.throwIfAborted();
 							return method === "screenshot" ? NativeScreenshotResult.parse(result) : WindowsResult.parse(result);
 						});
@@ -1185,6 +1197,7 @@ function installCua(ctx, config, backend) {
 							agent,
 							signal,
 							nativeClient,
+							arbiter: owner.arbiter,
 							coordinates: owner.coordinates
 						});
 						signal.throwIfAborted();
@@ -1197,8 +1210,7 @@ function installCua(ctx, config, backend) {
 					return await operation;
 				} finally {
 					pending.delete(operation);
-					const remaining = busyOwners.get(agent) - 1;
-					if (remaining === 0) busyOwners.delete(agent); else busyOwners.set(agent, remaining);
+
 				}
 			}
 		});
