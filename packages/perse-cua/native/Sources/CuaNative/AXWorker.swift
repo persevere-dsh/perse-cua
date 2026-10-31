@@ -66,7 +66,7 @@ private enum ApplicationTarget {
     case running(ProcessIdentity)
     case pending(InstalledApplication, JSONValue)
 }
-enum DriverOutcome: Sendable { case result(JSONValue), capture(CaptureTarget), foreground(ForegroundPlan), launch(ApplicationLaunch), paste(PastePlan) }
+enum DriverOutcome: Sendable { case result(JSONValue), hover(JSONValue, WindowRoute, CGPoint), capture(CaptureTarget), foreground(ForegroundPlan), launch(ApplicationLaunch), paste(PastePlan) }
 
 actor AXWorker {
     nonisolated let executor = NativeSerialExecutor()
@@ -397,8 +397,7 @@ actor AXWorker {
                             guard let bounds = try? self.ax().bounds(selected), bounds.width > 0, bounds.height > 0,
                                   let ownerWindow = try? self.ax().enclosingWindow(selected, owner: identity) else { return nil }
                             let route = WindowRoute(owner: identity, windowID: ownerWindow.windowID, bounds: ownerWindow.bounds)
-                            let point = WindowPoint(x: bounds.x + bounds.width / 2 - ownerWindow.bounds.x,
-                                                    y: bounds.y + bounds.height / 2 - ownerWindow.bounds.y)
+                            let point = WindowPointerInput.elementPoint(bounds, in: route)
                             guard (try? WindowPointerInput.validate(point, in: route)) != nil else { return nil }
                             return AXClickVisualTarget(route: route, point: point)
                         }, plan: self.planPointer, checkCancellation: { try self.cancellation.check() },
@@ -409,7 +408,7 @@ actor AXWorker {
                 }
                 guard let bounds = try ax().bounds(selected), bounds.width > 0, bounds.height > 0 else { throw NativeFailure(code: "NATIVE_ERROR", message: "Element has no pointer bounds") }
                 window = try ax().enclosingWindow(selected, owner: identity)
-                point = WindowPoint(x: bounds.x + bounds.width / 2 - window.bounds.x, y: bounds.y + bounds.height / 2 - window.bounds.y)
+                point = WindowPointerInput.elementPoint(bounds, in: WindowRoute(owner: identity, windowID: window.windowID, bounds: window.bounds))
             } else {
                 let id = try params.windowID()
                 try coordinateSnapshot(handle, params, id)
@@ -425,7 +424,7 @@ actor AXWorker {
                 }
                 let hover = hovers[handle] ?? AXHover()
                 hovers[handle] = hover
-                return .result(try Self.hoverResult(outcome: hover.move(to: hoverElement, in: route, access: ax())))
+                return try Self.hoverOutcome(route: route, point: point) { try hover.move(to: hoverElement, in: route, access: ax()) }
             }
             try await prepare(route, point: point)
             try inputs().1.click(in: route, at: point, button: button, count: count, modifiers: modifiers)
@@ -541,6 +540,10 @@ actor AXWorker {
             throw NativeFailure(code: "UNSUPPORTED", message: "Background hover requires accessibility alternate UI; use an advertised accessibility action or operate the control manually. 后台悬停需要辅助功能替代界面；请使用已声明的辅助功能操作或手动操作控件。")
         }
         return .object(["dispatched": .bool(outcome == .revealed), "verified": .bool(false), "hoverRoute": .string("accessibility"), "systemPointerMoved": .bool(false)])
+    }
+    static func hoverOutcome(route: WindowRoute, point: WindowPoint, move: () throws -> AXHoverOutcome) throws -> DriverOutcome {
+        let result = try hoverResult(outcome: move())
+        return .hover(result, route, CGPoint(x: route.bounds.x + point.x, y: route.bounds.y + point.y))
     }
     func shutdown() { closed = true; snapshots.removeAll(); observedWindowBounds.removeAll(); targets.removeAll(); hovers.removeAll(); access = nil; keyboard = nil; pointer = nil }
 }

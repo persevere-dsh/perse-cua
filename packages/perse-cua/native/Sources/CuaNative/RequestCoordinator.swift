@@ -194,6 +194,10 @@ import Darwin
             trace?.mark("worker.end")
             switch outcome {
             case .result(let value): result = value
+            case .hover(let value, let route, let point):
+                try Task.checkCancellation()
+                cursor.show(route, point: point)
+                result = value
             case .capture(let target):
                 let image = try await capture.capture(target, cancellation: cancellation, trace: trace)
                 result = try await worker.finishCapture(target, image: image, trace: trace)

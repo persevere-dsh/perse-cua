@@ -274,6 +274,10 @@ final class WindowPointerInput {
         }
     }
 
+    static func elementPoint(_ bounds: WindowBounds, in route: WindowRoute) -> WindowPoint {
+        WindowPoint(x: bounds.x + bounds.width / 2 - route.bounds.x, y: bounds.y + bounds.height / 2 - route.bounds.y)
+    }
+
     private static func screenPoint(_ point: WindowPoint, in route: WindowRoute) -> CGPoint {
         CGPoint(x: CGFloat(route.bounds.x + point.x), y: CGFloat(route.bounds.y + point.y))
     }
