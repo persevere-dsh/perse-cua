@@ -976,3 +976,46 @@ test('a failing capture cannot starve another application and revoked sessions s
     assert.equal(windows.has('a/app/1'), false)
   } finally { preview.close() }
 })
+
+test('size bookkeeping retires transient windows while retaining pinned-window resize baselines', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const source = await readFile(new URL('../packages/perse-cua/lib/types/native-preview.js', import.meta.url), 'utf8')
+  const instrumented = source.replace('windowSizes: new Map()', 'windowSizes: (globalThis.__previewSizeAudit = new Map())')
+  assert.notEqual(instrumented, source)
+  const { observeNative: instrumentedPreview } = await import(`data:text/javascript;base64,${Buffer.from(instrumented).toString('base64')}`)
+  const listeners = new Map(), windows = new Map(); let rows = [], scans = 0, pending
+  const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+  const view = { setDismissHandler(fn) { this.dismiss = fn }, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+  const preview = instrumentedPreview(ctx, view, { intervalMs: 5 }), agent = { id: 'a' }
+  try {
+    const row = (windowId, width) => ({ windowId, title: `Window ${windowId}`, bounds: { width, height: 100 }, isOnScreen: true, onCurrentSpace: true })
+    const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+    const until = async check => { for (let i = 0; i < 300 && !check(); i++) await new Promise(resolve => setTimeout(resolve, 2)); assert.ok(check()) }
+    emit('getApp', {}, { appHandle: 'app', name: 'Fixture' })
+    preview.hooks.onClient(agent, (_handle, windowId) => new Promise(resolve => { pending = { windowId, resolve } }), async () => { scans++; return rows })
+    view.watch('a', true)
+    for (let windowId = 100; windowId < 120; windowId++) {
+      rows = [row(windowId, 100)]; const before = scans; await until(() => scans > before)
+    }
+    rows = []; const before = scans; await until(() => scans > before)
+    assert.equal(windows.size, 0)
+    assert.equal(globalThis.__previewSizeAudit.size, 0, 'transient windows retained size records')
+    emit('screenshot', { appHandle: 'app', windowId: 7 }, { windowId: 7, data: 'YWJj', mimeType: 'image/png', bounds: { width: 320, height: 100 } })
+    const beforeMissing = scans; await until(() => scans >= beforeMissing + 2)
+    assert.deepEqual(globalThis.__previewSizeAudit.get(7), { width: 320, height: 100 })
+    assert.equal(windows.get('a/app/7').windowUnavailable, true)
+    rows = [row(7, 640)]
+    await until(() => windows.get('a/app/7')?.previewUnavailable && pending?.windowId === 7)
+    assert.deepEqual(globalThis.__previewSizeAudit.get(7), { width: 640, height: 100 })
+    pending.resolve({ windowId: 7, data: 'bmV3', mimeType: 'image/png', bounds: { width: 640, height: 100 } })
+    await until(() => windows.get('a/app/7')?.image === 'data:image/png;base64,bmV3')
+    view.dismiss('a/app/7'); view.remove('a/app/7')
+    assert.equal(globalThis.__previewSizeAudit.has(7), false)
+    preview.hooks.onClient(agent, async (_handle, windowId) => ({ windowId, data: 'YWJj', mimeType: 'image/png', bounds: { width: 100, height: 100 } }), async () => { scans++; return rows })
+    rows = [row(9, 100)]
+    await until(() => windows.get('a/app/9')?.image)
+    rows = []
+    await until(() => !windows.has('a/app/9'))
+    assert.equal(globalThis.__previewSizeAudit.has(9), false, 'removed automatic window retained size')
+  } finally { preview.close(); delete globalThis.__previewSizeAudit }
+})

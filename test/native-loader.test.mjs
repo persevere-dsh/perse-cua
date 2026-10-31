@@ -943,3 +943,32 @@ test('automatic provider previews refresh both windows while enumeration order c
     controller.abort(); await reader.return(); await consume
   } finally { await ctx.fiber.dispose(); await closeHost(); await rm(root, { recursive: true, force: true }) }
 })
+
+test('automatically removed window IDs can be reused at a different size', { skip: process.platform !== 'darwin' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'perse-preview-id-reuse-')), helper = join(root, 'native-helper.mjs')
+  const source = (await readFile(new URL('./fixtures/native-helper.mjs', import.meta.url), 'utf8'))
+    .replace("    if (method === 'listWindows') return [window, axlessWindow]", "    if (method === 'listWindows' && params.displayOnly) { const state = JSON.parse(readFileSync(new URL('./window-state.json', import.meta.url), 'utf8')); bounds.width = state.width; return state.visible ? [{ ...window, title: state.title }] : [] }\n    if (method === 'listWindows') return [window, axlessWindow]")
+  await writeFile(helper, source, { mode: 0o700 }); await writeFile(join(root, 'observe-helper'), '')
+  const setWindow = state => writeFile(join(root, 'window-state.json'), JSON.stringify(state))
+  await setWindow({ visible: true, width: 320, title: 'Original' })
+  const closeHost = await startFixtureHost(helper), ctx = new Context()
+  try {
+    for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess]) await ctx.plugin(plugin)
+    ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
+    ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] } } })
+    ctx.loader.builtins.perse = Main
+    await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper, previewRefreshIntervalMs: 1000, allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }] } }); await ctx.loader.await(); await waitFor(() => ctx.tools.get('cua'))
+    const agent = { id: 'reuse', ctx }; ctx.agents.get = id => id === agent.id ? agent : undefined
+    const app = await ctx.tools.execute({ name: 'cua', arguments: { method: 'getApp', params: { selector: 'Fixture' } }, agent, callId: 'reuse-app', signal: new AbortController().signal }); assert.equal(app.isError, false)
+    const controller = new AbortController(), reader = ctx.get('perseCuaView').watch(agent.id, controller.signal)[Symbol.asyncIterator]()
+    let latest = []; const consume = (async () => { for await (const items of { [Symbol.asyncIterator]: () => reader }) latest = items })()
+    const until = async check => { for (let i = 0; i < 700 && !check(); i++) await delay(10); assert.ok(check(), 'expected preview state did not arrive') }
+    await until(() => latest.some(item => item.title.endsWith('Original') && item.image))
+    const id = latest[0].id
+    await setWindow({ visible: false, width: 320, title: 'Original' }); await until(() => latest.length === 0)
+    await setWindow({ visible: true, width: 640, title: 'Replacement' })
+    await until(() => latest.some(item => item.id === id && item.title.endsWith('Replacement') && item.image && !item.previewUnavailable))
+    assert.equal(latest[0].windowUnavailable, false)
+    controller.abort(); await reader.return(); await consume
+  } finally { await ctx.fiber.dispose(); await closeHost(); await rm(root, { recursive: true, force: true }) }
+})

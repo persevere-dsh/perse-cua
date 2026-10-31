@@ -50,7 +50,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
       }
     }
   }
-  view.setDismissHandler(id => { captured.delete(id); dismissed.add(id); discoveryStatus.delete(id); automatic.delete(id); appearances.delete(id); missing.delete(id); captures.get(id)?.abort(); captures.delete(id); clearPoint(id); for (const apps of owners.values()) for (const app of apps.values()) for (const [window, item] of app.windows) if (item.id === id) app.windows.delete(window) })
+  view.setDismissHandler(id => { captured.delete(id); dismissed.add(id); discoveryStatus.delete(id); automatic.delete(id); appearances.delete(id); missing.delete(id); captures.get(id)?.abort(); captures.delete(id); clearPoint(id); for (const apps of owners.values()) for (const app of apps.values()) for (const [window, item] of app.windows) if (item.id === id) { app.windows.delete(window); app.windowSizes.delete(window) } })
   const schedule = (abort = false, sessionId?: string): void => {
     if (abort && (sessionId === undefined || backgroundAgent?.id === sessionId)) background?.abort()
     if (closed || !watchers.size) {
@@ -153,6 +153,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
               const item = { ...old, windowUnavailable: true }; app.windows.set(windowId, item); view.put(item)
             }
           }
+          for (const windowId of app.windowSizes.keys()) if (!seen.has(windowId) && !app.windows.has(windowId)) app.windowSizes.delete(windowId)
         }
       }
       const eligible = candidates.filter(candidate => candidate.valid())

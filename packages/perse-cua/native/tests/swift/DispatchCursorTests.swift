@@ -70,6 +70,60 @@ private final class CancelAfterFirstStep: @unchecked Sendable {
     #expect(!visibility.isCurrent(second))
 }
 
+@Test @MainActor func onlyTheCurrentPointerFailureCanHideItsCursor() {
+    let requests = CursorRequestOwnership()
+    var visible = true
+    let hide = { visible = false }
+    let first = requests.begin(method: "click", hide: hide)
+    #expect(!visible)
+    visible = true
+    let read = requests.begin(method: "screenshot", hide: hide)
+    requests.fail(read, hide: hide)
+    #expect(visible)
+    let second = requests.begin(method: "drag", hide: hide)
+    visible = true
+    requests.fail(first, hide: hide)
+    #expect(visible)
+    requests.fail(second, hide: hide)
+    #expect(!visible)
+    visible = true
+    requests.close(hide)
+    #expect(!visible)
+    visible = true
+    requests.fail(second, hide: hide)
+    #expect(visible)
+}
+
+@Test @MainActor func pointerOperationsKeepTheSchedulerUntilTheirDisplayCompletes() async throws {
+    let scheduler = RequestScheduler(), cancellation = CancellationLatch()
+    let (started, signalStarted) = AsyncStream<Void>.makeStream()
+    let (release, signalRelease) = AsyncStream<Void>.makeStream()
+    var positions: [Int] = []
+    let first = Task {
+        try await scheduler.perform(cancellation: cancellation) {
+            signalStarted.yield()
+            for await _ in release { break }
+            positions.append(1)
+            return .null
+        }
+    }
+    var iterator = started.makeAsyncIterator()
+    _ = await iterator.next()
+    let second = Task {
+        try await scheduler.perform(cancellation: cancellation) {
+            positions.append(2)
+            return .null
+        }
+    }
+    await Task.yield()
+    #expect(positions.isEmpty)
+    signalRelease.yield()
+    _ = try await first.value
+    _ = try await second.value
+    #expect(positions == [1, 2])
+    signalStarted.finish(); signalRelease.finish()
+}
+
 @Test @MainActor func cancelledCursorFadeCannotHideANewerCursor() async {
     let (started, signalStarted) = AsyncStream<Void>.makeStream()
     let (release, signalRelease) = AsyncStream<Void>.makeStream()

@@ -9,6 +9,7 @@ import Darwin
     private let cancellation: CancellationLatch
     private let worker: AXWorker
     private let cursor: DispatchCursor
+    private let cursorRequests = CursorRequestOwnership()
     private let capture: WindowCapture
     private let clipboard = ClipboardPaste()
     private let input: JSONLInput
@@ -102,11 +103,12 @@ import Darwin
             guard let self else { return }
             defer { control.finish() }
             var requestID: JSONValue = .null
+            var cursorRequest: UInt64?
             let response: JSONValue
             do {
                 let request = try NativeRequest(data: data)
                 requestID = .string(request.id)
-                if ["click", "hover", "scroll", "drag"].contains(request.method) { self.cursor.hide() }
+                cursorRequest = self.cursorRequests.begin(method: request.method) { self.cursor.hide() }
                 if request.method == "screenshot" { try self.capture.requireAvailable() }
                 let result = try await self.scheduler.perform(cancellation: self.cancellation) {
                     control.startOperation()
@@ -115,12 +117,12 @@ import Darwin
                 if let failure = control.failure { throw failure }
                 response = .object(["id": requestID, "result": result])
             } catch let error as NativeFailure {
-                self.cursor.hide()
+                self.cursorRequests.fail(cursorRequest) { self.cursor.hide() }
                 let failure = control.failure ?? error
                 trace?.mark("helper.failed", errorCode: failure.code)
                 response = .object(["id": requestID, "error": .object(["code": .string(failure.code), "message": .string(failure.message)])])
             } catch {
-                self.cursor.hide()
+                self.cursorRequests.fail(cursorRequest) { self.cursor.hide() }
                 let failure = control.failure ?? NativeFailure(code: requestID == .null ? "INVALID_REQUEST" : "NATIVE_ERROR", message: error.localizedDescription)
                 trace?.mark("helper.failed", errorCode: failure.code)
                 response = .object(["id": requestID, "error": .object([
@@ -237,7 +239,7 @@ import Darwin
     private func shutdown() {
         guard !stopping else { return }
         stopping = true
-        cursor.close()
+        cursorRequests.close { cursor.close() }
         cancellation.cancel()
         deadline?.cancel()
         deadline = nil

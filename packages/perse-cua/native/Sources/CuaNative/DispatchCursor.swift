@@ -1,6 +1,28 @@
 import AppKit
 import CoreGraphics
 
+/// Keep request failure cleanup attached to the pointer operation that owns it.
+@MainActor final class CursorRequestOwnership {
+    private var revision: UInt64 = 0
+
+    func begin(method: String, hide: () -> Void) -> UInt64? {
+        guard ["click", "hover", "scroll", "drag"].contains(method) else { return nil }
+        revision &+= 1
+        hide()
+        return revision
+    }
+
+    func fail(_ owner: UInt64?, hide: () -> Void) {
+        guard let owner, owner == revision else { return }
+        hide()
+    }
+
+    func close(_ hide: () -> Void) {
+        revision &+= 1
+        hide()
+    }
+}
+
 /// Displays a plan and the last pointer position dispatched by one connection.
 @MainActor final class DispatchCursor {
     private var panel: NSPanel?
