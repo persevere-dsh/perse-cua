@@ -923,3 +923,56 @@ test('window changes cancel action-triggered captures and ignore late frames', a
     } finally { preview.close() }
   }
 })
+
+test('automatic previews rotate by window identity when discovery order changes', async () => {
+  const listeners = new Map(), windows = new Map(), shots = []; let scans = 0
+  const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+  const view = { setDismissHandler(fn) { this.dismiss = fn }, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+  const preview = observeNative(ctx, view, { intervalMs: 10 }), agent = { id: 'a' }
+  try {
+    const row = windowId => ({ windowId, title: `Window ${windowId}`, bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true })
+    const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+    emit('getApp', {}, { appHandle: 'app', name: 'Fixture' })
+    for (const windowId of [1, 2]) emit('screenshot', { appHandle: 'app', windowId }, { windowId, data: 'YWJj', mimeType: 'image/png' })
+    let ids = [1, 2]
+    preview.hooks.onClient(agent, async (_handle, windowId) => { shots.push(windowId); return { windowId, data: 'YWJj', mimeType: 'image/png' } }, async () => { scans++; const order = scans % 2 ? ids : [...ids].reverse(); return order.map(row) })
+    view.watch('a', true)
+    const until = async condition => { for (let i = 0; i < 200 && !condition(); i++) await new Promise(resolve => setTimeout(resolve, 5)); assert.ok(condition()) }
+    await until(() => shots.length >= 8)
+    assert.deepEqual(shots.slice(0, 8), [1, 2, 1, 2, 1, 2, 1, 2])
+    ids = [1, 2, 3]
+    await until(() => shots.includes(3))
+    view.dismiss('a/app/2'); view.remove('a/app/2'); ids = [1, 3]
+    const cutoff = shots.length
+    await until(() => shots.length >= cutoff + 6)
+    assert.equal(shots.slice(cutoff).includes(2), false)
+    assert.deepEqual(new Set(shots.slice(cutoff)), new Set([1, 3]))
+    view.watch('a', false)
+    const stopped = shots.length; await new Promise(resolve => setTimeout(resolve, 40))
+    assert.equal(shots.length, stopped)
+  } finally { preview.close() }
+})
+
+test('a failing capture cannot starve another application and revoked sessions stop', async () => {
+  const listeners = new Map(), windows = new Map(), attempts = []
+  const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+  const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+  const preview = observeNative(ctx, view, { intervalMs: 10 }), a = { id: 'a' }, b = { id: 'b' }
+  try {
+    const emit = (agent, method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+    const row = { windowId: 1, title: 'Window', bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }
+    for (const agent of [a, b]) {
+      emit(agent, 'getApp', {}, { appHandle: 'app', name: agent.id })
+      emit(agent, 'screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'YWJj', mimeType: 'image/png' })
+      preview.hooks.onClient(agent, async (_handle, windowId) => { attempts.push(agent.id); if (agent === a) throw Object.assign(new Error('fixture'), { code: 'STALE_APP' }); return { windowId, data: 'YWJj', mimeType: 'image/png' } }, async () => [row])
+      view.watch(agent.id, true)
+    }
+    for (let i = 0; i < 200 && attempts.length < 6; i++) await new Promise(resolve => setTimeout(resolve, 5))
+    assert.deepEqual(attempts.slice(0, 6), ['a', 'b', 'a', 'b', 'a', 'b'])
+    preview.hooks.onRevoke(a, 'app'); view.watch('a', false)
+    const cutoff = attempts.length
+    for (let i = 0; i < 200 && attempts.length < cutoff + 3; i++) await new Promise(resolve => setTimeout(resolve, 5))
+    assert.deepEqual(attempts.slice(cutoff, cutoff + 3), ['b', 'b', 'b'])
+    assert.equal(windows.has('a/app/1'), false)
+  } finally { preview.close() }
+})

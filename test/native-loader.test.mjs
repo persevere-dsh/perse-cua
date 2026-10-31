@@ -914,3 +914,32 @@ test('queued relative input uses the latest observed bounds before native dispat
     assert.equal((await events()).filter(event => event.method === 'click').length, 3)
   } finally { await ctx.fiber.dispose(); await closeHost(); await rm(root, { recursive: true, force: true }) }
 })
+
+test('automatic provider previews refresh both windows while enumeration order changes', { skip: process.platform !== 'darwin' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'perse-preview-window-rotation-')), helper = join(root, 'native-helper.mjs')
+  const source = (await readFile(new URL('./fixtures/native-helper.mjs', import.meta.url), 'utf8'))
+    .replace('  const snapshots = new Map()', '  let displayOrder = 0\n  const snapshots = new Map()')
+    .replace("    if (method === 'listWindows') return [window, axlessWindow]", "    if (method === 'listWindows') return params.displayOnly && ++displayOrder % 2 === 0 ? [axlessWindow, window] : [window, axlessWindow]")
+  await writeFile(helper, source, { mode: 0o700 }); await writeFile(join(root, 'observe-helper'), '')
+  const closeHost = await startFixtureHost(helper), ctx = new Context()
+  try {
+    for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess]) await ctx.plugin(plugin)
+    ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
+    ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] } } })
+    ctx.loader.builtins.perse = Main
+    await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper, previewRefreshIntervalMs: 1000, allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }] } }); await ctx.loader.await(); await waitFor(() => ctx.tools.get('cua'))
+    const agent = { id: 'rotation', ctx }; ctx.agents.get = id => id === agent.id ? agent : undefined
+    const result = await ctx.tools.execute({ name: 'cua', arguments: { method: 'getApp', params: { selector: 'Fixture' } }, agent, callId: 'rotation-app', signal: new AbortController().signal })
+    assert.equal(result.isError, false)
+    const controller = new AbortController(), reader = ctx.get('perseCuaView').watch(agent.id, controller.signal)[Symbol.asyncIterator]()
+    let latest = []; const consume = (async () => { for await (const items of { [Symbol.asyncIterator]: () => reader }) latest = items })()
+    const shots = async () => (await readFile(join(root, 'helper-events.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse).filter(event => event.method === 'screenshot' && event.params.displayOnly).map(event => event.params.windowId)
+    for (let i = 0; i < 900 && (await shots()).length < 4; i++) await delay(10)
+    const first = (await shots()).slice(0, 4)
+    assert.equal(first.length, 4); assert.notEqual(first[0], first[1])
+    assert.equal(first[0], first[2]); assert.equal(first[1], first[3])
+    assert.deepEqual(new Set(first), new Set([7, 8]))
+    assert.equal(latest.filter(item => item.image).length, 2)
+    controller.abort(); await reader.return(); await consume
+  } finally { await ctx.fiber.dispose(); await closeHost(); await rm(root, { recursive: true, force: true }) }
+})

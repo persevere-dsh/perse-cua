@@ -25,7 +25,8 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
   let background: AbortController | undefined
   let backgroundAgent: Agent | undefined
   let refreshTimer: ReturnType<typeof setTimeout> | undefined
-  let cursor = 0
+  let captureOrder = 0
+  const captured = new Map<string, number>()
   const intervalMs = options.intervalMs ?? 3000
   const captures = new Map<string, AbortController>()
   const pointTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -49,7 +50,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
       }
     }
   }
-  view.setDismissHandler(id => { dismissed.add(id); discoveryStatus.delete(id); automatic.delete(id); appearances.delete(id); missing.delete(id); captures.get(id)?.abort(); captures.delete(id); clearPoint(id); for (const apps of owners.values()) for (const app of apps.values()) for (const [window, item] of app.windows) if (item.id === id) app.windows.delete(window) })
+  view.setDismissHandler(id => { captured.delete(id); dismissed.add(id); discoveryStatus.delete(id); automatic.delete(id); appearances.delete(id); missing.delete(id); captures.get(id)?.abort(); captures.delete(id); clearPoint(id); for (const apps of owners.values()) for (const app of apps.values()) for (const [window, item] of app.windows) if (item.id === id) app.windows.delete(window) })
   const schedule = (abort = false, sessionId?: string): void => {
     if (abort && (sessionId === undefined || backgroundAgent?.id === sessionId)) background?.abort()
     if (closed || !watchers.size) {
@@ -65,7 +66,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
     const controller = new AbortController(); background = controller
     let current: { agent: Agent; handle: string; window: number; valid: () => boolean } | undefined
     try {
-      const candidates: Array<{ agent: Agent; handle: string; window: number; valid: () => boolean }> = []
+      const candidates: Array<{ agent: Agent; handle: string; window: number; id: string; valid: () => boolean }> = []
       for (const [agent, apps] of owners) {
         if (!watchers.has(agent.id)) continue
         const list = lists.get(agent)
@@ -137,7 +138,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
               app.windows.set(row.windowId, item); view.put(item)
             }
             const item = app.windows.get(row.windowId)
-            if (item) candidates.push({ agent, handle, window: row.windowId, valid: () =>
+            if (item) candidates.push({ agent, handle, window: row.windowId, id, valid: () =>
               listValid() && app.windows.get(row.windowId) === item && !dismissed.has(id) })
           }
           const prefix = `${encodeURIComponent(agent.id)}/${encodeURIComponent(handle)}/`
@@ -147,7 +148,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
             if (automatic.has(old.id)) {
               const count = (missing.get(old.id) ?? 0) + 1
               missing.set(old.id, count)
-              if (count >= 3) { automatic.delete(old.id); missing.delete(old.id); app.windows.delete(windowId); app.captures.delete(windowId); view.remove(old.id) }
+              if (count >= 3) { captured.delete(old.id); automatic.delete(old.id); missing.delete(old.id); app.windows.delete(windowId); app.captures.delete(windowId); view.remove(old.id) }
             } else if (!old.windowUnavailable) {
               const item = { ...old, windowUnavailable: true }; app.windows.set(windowId, item); view.put(item)
             }
@@ -156,8 +157,8 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
       }
       const eligible = candidates.filter(candidate => candidate.valid())
       if (!eligible.length) return
-      const target = eligible[cursor++ % eligible.length]
-      if (!target) return
+      const target = eligible.reduce((oldest, candidate) => (captured.get(candidate.id) ?? 0) < (captured.get(oldest.id) ?? 0) ? candidate : oldest)
+      captured.set(target.id, ++captureOrder)
       current = target
       const capture = clients.get(target.agent), app = owners.get(target.agent)?.get(target.handle)
       if (!capture || !app) return
@@ -349,6 +350,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
   })
   const stopAgent = ctx.on('agent/disposed', ({ agent }) => {
     disposed.add(agent)
+    for (const id of captured.keys()) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) captured.delete(id)
     clients.delete(agent); lists.delete(agent); for (const id of dismissed) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { dismissed.delete(id); automatic.delete(id); appearances.delete(id); missing.delete(id) }; for (const id of automatic) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { automatic.delete(id); missing.delete(id) }; for (const id of appearances.keys()) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) appearances.delete(id); schedule(true, agent.id)
     for (const [id, controller] of captures) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { controller.abort(); captures.delete(id) }
     for (const id of pointTimers.keys()) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) clearPoint(id)
@@ -366,9 +368,10 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
           captures.get(item.id)?.abort(); captures.delete(item.id); clearPoint(item.id); view.remove(item.id)
         } }
         owners.delete(agent)
+        for (const id of captured.keys()) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) captured.delete(id)
         clients.delete(agent); lists.delete(agent); for (const id of dismissed) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { dismissed.delete(id); automatic.delete(id); appearances.delete(id); missing.delete(id) }; for (const id of automatic) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { automatic.delete(id); missing.delete(id) }; for (const id of appearances.keys()) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) appearances.delete(id); schedule(true, agent.id)
       },
     },
-    close: () => { closed = true; if (refreshTimer) clearTimeout(refreshTimer); background?.abort(); watchers.clear(); watcherVersions.clear(); lists.clear(); dismissed.clear(); automatic.clear(); appearances.clear(); missing.clear(); unsupported.clear(); discoveryStatus.clear(); stop(); stopAgent(); for (const controller of captures.values()) controller.abort(); captures.clear(); for (const id of pointTimers.keys()) clearPoint(id); clients.clear(); owners.clear() },
+    close: () => { closed = true; if (refreshTimer) clearTimeout(refreshTimer); background?.abort(); watchers.clear(); watcherVersions.clear(); captured.clear(); lists.clear(); dismissed.clear(); automatic.clear(); appearances.clear(); missing.clear(); unsupported.clear(); discoveryStatus.clear(); stop(); stopAgent(); for (const controller of captures.values()) controller.abort(); captures.clear(); for (const id of pointTimers.keys()) clearPoint(id); clients.clear(); owners.clear() },
   }
 }
