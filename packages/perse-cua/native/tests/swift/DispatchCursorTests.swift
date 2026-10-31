@@ -58,3 +58,50 @@ private final class CancelAfterFirstStep: @unchecked Sendable {
     try input.click(in: route, at: WindowPoint(x: 10, y: 10), button: "left", count: 1)
     #expect(trace.read() == ["post:5:110.0", "cursor:110.0", "post:1:110.0", "cursor:110.0", "post:2:110.0"])
 }
+
+@Test func newerCursorVisibilityInvalidatesDelayedFadeAndHide() {
+    let visibility = CursorVisibility()
+    let first = visibility.advance()
+    #expect(visibility.isCurrent(first))
+    let second = visibility.advance()
+    #expect(!visibility.isCurrent(first))
+    #expect(visibility.isCurrent(second))
+    visibility.advance()
+    #expect(!visibility.isCurrent(second))
+}
+
+@Test @MainActor func cancelledCursorFadeCannotHideANewerCursor() async {
+    let (started, signalStarted) = AsyncStream<Void>.makeStream()
+    let (release, signalRelease) = AsyncStream<Void>.makeStream()
+    var hidden = false
+    let task = scheduleCursorFade(delay: {
+        signalStarted.yield()
+        for await _ in release { return }
+    }, onReady: { hidden = true })
+    var iterator = started.makeAsyncIterator()
+    _ = await iterator.next()
+    task.cancel()
+    signalRelease.yield()
+    signalRelease.finish()
+    await task.value
+    signalStarted.finish()
+    #expect(!hidden)
+}
+
+@Test @MainActor func cursorFadeWaitsUntilTheDelayCompletes() async {
+    let (started, signalStarted) = AsyncStream<Void>.makeStream()
+    let (release, signalRelease) = AsyncStream<Void>.makeStream()
+    var fadeCount = 0
+    let task = scheduleCursorFade(delay: {
+        signalStarted.yield()
+        for await _ in release { return }
+    }, onReady: { fadeCount += 1 })
+    var iterator = started.makeAsyncIterator()
+    _ = await iterator.next()
+    #expect(fadeCount == 0)
+    signalRelease.yield()
+    signalRelease.finish()
+    await task.value
+    signalStarted.finish()
+    #expect(fadeCount == 1)
+}

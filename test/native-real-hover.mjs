@@ -50,14 +50,9 @@ try {
   const target = { appHandle: app.appHandle, windowId: window.windowId }
   const state = await checked('getState', target)
   const resize = /\[(\d+)\] AXButton[^\n]*Resize fixture/.exec(state.tree); assert.ok(resize, state.tree)
-  await checked('activate', { appHandle: app.appHandle })
-  await delay(4000)
-  for (const x of [400, 500, 600, 450]) {
-    const result = await checked('hover', { ...target, relative: true, x, y: 500 })
-    assert.equal(result.hoverRoute, 'system-pointer')
-    assert.equal(result.systemPointerMoved, true)
-    await delay(300)
-  }
+  const hover = await call('hover', { ...target, relative: true, x: 500, y: 500 })
+  assert.equal(hover.isError, true, JSON.stringify(hover))
+  assert.match(JSON.stringify(hover), /UNSUPPORTED/)
   const controller = new AbortController()
   const reader = ctx.get('perseCuaView').watch(agent.id, controller.signal)[Symbol.asyncIterator]()
   let current = (await reader.next()).value
@@ -67,7 +62,7 @@ try {
   const item = (await marker).value.find(row => row.id.endsWith('/' + window.windowId))
   assert.deepEqual(item.point, { x: 0.5, y: 0.5 })
   controller.abort(); await reader.return()
-  console.log('PASS: owned fixture received four system-pointer hover operations and a coordinate click')
+  console.log('PASS: unsupported hover is reported and coordinate click dispatches')
 } finally {
   await ctx.fiber.dispose()
   if (fixture && fixture.exitCode === null) { fixture.kill(); await once(fixture, 'close') }

@@ -791,7 +791,7 @@ const ActionResult = z.object({
 	verified: z.literal(false)
 });
 ActionResult.extend({
-	hoverRoute: z.enum(["accessibility", "system-pointer"]),
+	hoverRoute: z.enum(["accessibility"]),
 	systemPointerMoved: z.boolean()
 });
 ActionResult.extend({

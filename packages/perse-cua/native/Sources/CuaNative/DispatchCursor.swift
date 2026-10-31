@@ -5,7 +5,8 @@ import CoreGraphics
 @MainActor final class DispatchCursor {
     private var panel: NSPanel?
     private var closed = false
-    private var revision: UInt64 = 0
+    private let visibility = CursorVisibility()
+    private var fadeTask: Task<Void, Never>?
     private var unavailableReported = false
     private var lastRoute: WindowRoute?
     private var lastPoint: CGPoint?
@@ -13,7 +14,8 @@ import CoreGraphics
     func plan(_ route: WindowRoute, point: WindowPoint) async throws {
         let destination = CGPoint(x: route.bounds.x + point.x, y: route.bounds.y + point.y)
         guard let window = window(for: destination) else { return }
-        revision &+= 1
+        fadeTask?.cancel()
+        visibility.advance()
         let sameWindow = lastRoute.map { $0.owner == route.owner && $0.windowID == route.windowID && $0.bounds == route.bounds } ?? false
         let origin = sameWindow ? lastPoint : nil
         setPlanned(true, on: window)
@@ -42,26 +44,31 @@ import CoreGraphics
         guard let window = window(for: point), let frame = frame(for: point) else { return }
         lastRoute = route
         lastPoint = point
-        revision &+= 1
-        let shownRevision = revision
+        fadeTask?.cancel()
+        let shownRevision = visibility.advance()
         setPlanned(false, on: window)
         (window.contentView as? DispatchCursorView)?.clicked = clicked
         window.alphaValue = 1
         window.setFrame(frame, display: true)
         window.orderFrontRegardless()
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.8
-            window.animator().alphaValue = 0
-        } completionHandler: { [weak self, weak window] in
-            Task { @MainActor in
-                guard let self, self.revision == shownRevision else { return }
-                window?.orderOut(nil)
+        fadeTask = scheduleCursorFade(delay: { try await Task.sleep(for: .seconds(1.5)) }) { [weak self, weak window] in
+            guard let self, let window, self.visibility.isCurrent(shownRevision) else { return }
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.5
+                window.animator().alphaValue = 0
+            } completionHandler: { [weak self, weak window] in
+                Task { @MainActor in
+                    guard let self, self.visibility.isCurrent(shownRevision) else { return }
+                    window?.orderOut(nil)
+                }
             }
         }
     }
 
     func hide() {
-        revision &+= 1
+        fadeTask?.cancel()
+        fadeTask = nil
+        visibility.advance()
         panel?.orderOut(nil)
     }
 
@@ -108,6 +115,29 @@ import CoreGraphics
         view.clicked = false
         view.needsDisplay = true
     }
+}
+
+/// Schedule a fade without retaining a closed cursor or blocking the main actor.
+@MainActor func scheduleCursorFade(
+    delay: @escaping @Sendable () async throws -> Void,
+    onReady: @escaping @MainActor () -> Void
+) -> Task<Void, Never> {
+    Task { @MainActor in
+        do { try await delay(); try Task.checkCancellation() } catch { return }
+        onReady()
+    }
+}
+
+/// Invalidates delayed fade completions when a newer cursor state replaces them.
+final class CursorVisibility {
+    private var revision: UInt64 = 0
+
+    @discardableResult func advance() -> UInt64 {
+        revision &+= 1
+        return revision
+    }
+
+    func isCurrent(_ token: UInt64) -> Bool { revision == token }
 }
 
 private final class DispatchCursorView: NSView {

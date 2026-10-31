@@ -2,6 +2,7 @@ node_modules
 lib/
 dist/
 *.tgz
+__pycache__/
 
 # Copied from the repository sources before packing.
 packages/perse-cua/README.md

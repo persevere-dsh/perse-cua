@@ -109,7 +109,7 @@ export async function apply(ctx) {
         }, [selected])
         useEffect(() => { if (switching.current) { switching.current = false; root.current?.querySelector('.cua-preview')?.focus() } }, [active])
         useEffect(() => { if (!selected) return; const key = event => { if (event.key === 'Escape') setSelected(null) }; window.addEventListener('keydown', key); return () => window.removeEventListener('keydown', key) }, [selected])
-        const close = async id => { try { const result = await child.remote.perseCuaView.dismiss(currentSession, id); setError(result.ok ? '' : t('failed')) } catch { setError(t('failed')) } }
+        const close = async id => { try { await child.remote.perseCuaView.dismiss(currentSession, id); setError('') } catch { setError(t('failed')) } }
         const item = items.find(row => row.id === (selected || active)) ?? items[0]
         const behind = items.filter(row => row.id !== item?.id)
         const stack = n => n ? `clamp(${n * 3}px, calc(${100 * n / (behind.length + 1)}vh - ${250 * n / (behind.length + 1)}px), ${n * 40}px)` : '0px'

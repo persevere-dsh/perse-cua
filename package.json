@@ -13,7 +13,9 @@
     "bundle": "tsdown",
     "build:native": "node scripts/build-native.mjs",
     "pack": "npm run build && npm pack --workspace perse-cua",
-    "test": "npm run build && node --test test/*.test.mjs"
+    "test": "npm run build && node --test test/*.test.mjs",
+    "preview:bench": "node scripts/generate-remote.mjs && node test/preview-bench/server.mjs",
+    "test:preview-bench": "node scripts/generate-remote.mjs && node --test test/preview-bench.test.mjs test/preview-client.test.mjs test/client-dismiss.test.mjs"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
@@ -28,6 +30,8 @@
     "@deepseek-ai/dsh-typert-protocol": "^0.2.1-rc.2",
     "@types/node": "^24.0.0",
     "react": "^18.2.0",
+    "react-dom": "^18.3.1",
+    "react-test-renderer": "^18.3.1",
     "tsdown": "^0.22.2",
     "typescript": "6.0.3"
   }
