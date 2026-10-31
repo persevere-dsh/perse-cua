@@ -312,3 +312,54 @@ test('removing an absent status does not publish a duplicate snapshot', async ()
     assert.deepEqual((await removed).value, [])
   } finally { view.close(); await reader.return() }
 })
+
+test('slow preview subscribers receive only the latest live click and discard invalidated feedback', async () => {
+  const { PreviewService } = await import('../packages/perse-cua/lib/types/view.js')
+  const view = new PreviewService(new Context()), controller = new AbortController()
+  const reader = view.watch('agent', controller.signal)[Symbol.asyncIterator]()
+  const base = { id: 'agent/app/7', title: 'Fixture', action: 'click', image: 'data:image/png;base64,YQ==' }
+  view.put(base); await reader.next()
+  view.put({ ...base, point: { x: 0.1, y: 0.2 } }, true)
+  view.put({ ...base, point: { x: 0.3, y: 0.4 } }, true)
+  view.put({ ...base, image: 'data:image/png;base64,Yg==' })
+  assert.deepEqual((await reader.next()).value[0].point, { x: 0.3, y: 0.4 })
+  assert.equal((await reader.next()).value[0].image, 'data:image/png;base64,Yg==')
+  for (const invalidate of [() => view.invalidatePoint(base.id), () => view.put({ ...base, windowUnavailable: true }), () => view.put({ ...base, image: undefined }), () => view.remove(base.id)]) {
+    view.put({ ...base, point: { x: 0.2, y: 0.2 } }, true); invalidate()
+    assert.equal((await reader.next()).value[0]?.point, undefined)
+  }
+  view.put({ ...base, point: { x: 0.2, y: 0.2 } }, true); view.put(base)
+  await pause(950)
+  assert.equal((await reader.next()).value[0].point, undefined)
+  controller.abort(); await reader.return(); view.close()
+})
+
+
+test('slow subscribers retain each window click without extending its lifetime on title changes', async () => {
+  const { PreviewService } = await import('../packages/perse-cua/lib/types/view.js')
+  const view = new PreviewService(new Context()), controller = new AbortController()
+  const reader = view.watch('agent', controller.signal)[Symbol.asyncIterator]()
+  const a = { id: 'agent/app-a/7', title: 'A', action: 'click', image: 'data:image/png;base64,YQ==' }
+  const b = { ...a, id: 'agent/app-b/7', title: 'B' }
+  view.put(a); view.put(b); await reader.next()
+  view.put({ ...a, point: { x: 0.1, y: 0.2 } }, true)
+  view.put({ ...b, point: { x: 0.3, y: 0.4 } }, true)
+  view.put(a); view.put(b)
+  const marked = (await reader.next()).value
+  assert.deepEqual(marked.find(item => item.id === a.id).point, { x: 0.1, y: 0.2 })
+  assert.deepEqual(marked.find(item => item.id === b.id).point, { x: 0.3, y: 0.4 })
+  await reader.next()
+  const point = { x: 0.5, y: 0.6 }
+  view.put({ ...a, point }, true); view.put(a)
+  await pause(650)
+  view.put({ ...a, title: 'renamed', point }); view.put(a)
+  await pause(300)
+  assert.equal((await reader.next()).value.find(item => item.id === a.id).point, undefined)
+  for (const flag of ['windowUnavailable', 'previewUnavailable', 'failed']) {
+    view.put({ ...a, point, [flag]: true }, true); view.put(a)
+    assert.equal((await reader.next()).value.find(item => item.id === a.id).point, undefined)
+  }
+  view.put({ ...a, image: undefined, point }, true); view.put(a)
+  assert.equal((await reader.next()).value.find(item => item.id === a.id).point, undefined)
+  controller.abort(); await reader.return(); view.close()
+})

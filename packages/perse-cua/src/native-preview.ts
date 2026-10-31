@@ -120,6 +120,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
             const size = app.windowSizes.get(row.windowId)
             app.windowSizes.set(row.windowId, { width: row.bounds.width, height: row.bounds.height })
             if (old && size && (size.width !== row.bounds.width || size.height !== row.bounds.height)) {
+              view.invalidatePoint?.(id)
               captures.get(id)?.abort(); captures.delete(id); clearPoint(id); app.captures.delete(row.windowId); app.modelImages.delete(row.windowId); app.observations.delete(row.windowId)
               const { point: _point, ...rest } = old
               old = { ...rest, previewUnavailable: true }; app.windows.set(row.windowId, old); view.put(old)
@@ -144,13 +145,16 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
           const prefix = `${encodeURIComponent(agent.id)}/${encodeURIComponent(handle)}/`
           for (const id of appearances.keys()) if (id.startsWith(prefix) && !visible.some(row => idFor(agent, handle, row.windowId) === id)) appearances.delete(id)
           for (const [windowId, old] of app.windows) if (!seen.has(windowId)) {
+            view.invalidatePoint?.(old.id); clearPoint(old.id)
             captures.get(old.id)?.abort(); captures.delete(old.id)
+            const { point: _point, ...withoutPoint } = old
             if (automatic.has(old.id)) {
               const count = (missing.get(old.id) ?? 0) + 1
               missing.set(old.id, count)
               if (count >= 3) { captured.delete(old.id); automatic.delete(old.id); missing.delete(old.id); app.windows.delete(windowId); app.captures.delete(windowId); view.remove(old.id) }
-            } else if (!old.windowUnavailable) {
-              const item = { ...old, windowUnavailable: true }; app.windows.set(windowId, item); view.put(item)
+              else if (old.point) { app.windows.set(windowId, withoutPoint); view.put(withoutPoint) }
+            } else if (!old.windowUnavailable || old.point) {
+              const item = { ...withoutPoint, windowUnavailable: true }; app.windows.set(windowId, item); view.put(item)
             }
           }
           for (const windowId of app.windowSizes.keys()) if (!seen.has(windowId) && !app.windows.has(windowId)) app.windowSizes.delete(windowId)
@@ -253,15 +257,15 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
         if (!old) continue
         const title = [app.name, typeof window.title === 'string' ? window.title : ''].filter(Boolean).join(' · ')
         const unavailable = window.isOnScreen === false || window.onCurrentSpace === false
-        if (resized || unavailable) { captures.get(old.id)?.abort(); captures.delete(old.id) }
+        if (resized || unavailable) { view.invalidatePoint?.(old.id); clearPoint(old.id); captures.get(old.id)?.abort(); captures.delete(old.id) }
         if (resized) { clearPoint(old.id); app.captures.delete(windowId); app.modelImages.delete(windowId); if (method !== 'getState') app.observations.delete(windowId) }
         if (old.title !== title || !!old.windowUnavailable !== unavailable || resized) {
           const { windowUnavailable: _unavailable, point, ...rest } = old
-          const item = { ...rest, title, ...(!resized && point ? { point } : {}), ...(unavailable ? { windowUnavailable: true } : {}), ...(resized ? { previewUnavailable: true } : {}) }
+          const item = { ...rest, title, ...(!resized && !unavailable && point ? { point } : {}), ...(unavailable ? { windowUnavailable: true } : {}), ...(resized ? { previewUnavailable: true } : {}) }
           app.windows.set(windowId, item); view.put(item)
         }
       }
-      for (const [windowId, old] of app.windows) if (!seen.has(windowId) && !old.windowUnavailable) { captures.get(old.id)?.abort(); captures.delete(old.id); const item = { ...old, windowUnavailable: true }; app.windows.set(windowId, item); view.put(item) }
+      for (const [windowId, old] of app.windows) if (!seen.has(windowId) && !old.windowUnavailable) { view.invalidatePoint?.(old.id); clearPoint(old.id); captures.get(old.id)?.abort(); captures.delete(old.id); const { point: _point, ...rest } = old; const item = { ...rest, windowUnavailable: true }; app.windows.set(windowId, item); view.put(item) }
     }
     if (method === 'listWindows') return
     const selected = typeof value?.windowId === 'number' ? value.windowId : typeof params.windowId === 'number' ? params.windowId : typeof params.snapshotId === 'string' && app.snapshots.has(params.snapshotId) ? app.snapshots.get(params.snapshotId) : typeof value?.focusedWindowId === 'number' ? value.focusedWindowId : app.selected
@@ -296,7 +300,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
       item.point = relative ? { x: params.x / 1000, y: params.y / 1000 } : { x: params.x / model!.width, y: params.y / model!.height }
       pointTimers.set(id, setTimeout(() => { pointTimers.delete(id); const current = app.windows.get(selected); if (!current) return; const { point: _point, ...rest } = current; app.windows.set(selected, rest); view.put(rest) }, 900))
     }
-    app.windows.set(selected, item); view.put(item)
+    app.windows.set(selected, item); view.put(item, !!item.point)
     const previous = captures.get(id)
     previous?.abort()
     captures.delete(id)

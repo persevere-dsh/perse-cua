@@ -1019,3 +1019,38 @@ test('size bookkeeping retires transient windows while retaining pinned-window r
     assert.equal(globalThis.__previewSizeAudit.has(9), false, 'removed automatic window retained size')
   } finally { preview.close(); delete globalThis.__previewSizeAudit }
 })
+
+test('background window disappearance clears pending click frames while retaining last images', async () => {
+  const { Context } = await import('@deepseek-ai/cordis')
+  const { PreviewService } = await import('../packages/perse-cua/lib/types/view.js')
+  const listeners = new Map(), ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+  const view = new PreviewService(new Context()), preview = observeNative(ctx, view, { intervalMs: 40 }), agent = { id: 'gone' }
+  let scans = 0, rows = [1, 2].map(windowId => ({ windowId, title: `Window ${windowId}`, bounds: { width: 100, height: 100 }, isOnScreen: true }))
+  const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  preview.hooks.onClient(agent, async (_handle, windowId) => ({ windowId, data: 'YWJj', mimeType: 'image/png', bounds: { width: 100, height: 100 } }), async () => { scans++; return rows })
+  emit('getApp', {}, { appHandle: 'app', name: 'Fixture' })
+  const controller = new AbortController(), reader = view.watch(agent.id, controller.signal)[Symbol.asyncIterator]()
+  await reader.next()
+  for (let i = 0; i < 100 && (!view.windows.get('gone/app/1')?.image || !view.windows.get('gone/app/2')?.image); i++) await new Promise(resolve => setTimeout(resolve, 10))
+  assert.ok(view.windows.get('gone/app/1')?.image); assert.ok(view.windows.get('gone/app/2')?.image)
+  emit('getState', { appHandle: 'app', windowId: 1 }, { windowId: 1, windows: rows })
+  await new Promise(resolve => setImmediate(resolve))
+  emit('click', { appHandle: 'app', windowId: 1, relative: true, x: 250, y: 500 }, { dispatched: true })
+  assert.ok(view.windows.get('gone/app/1').point)
+  const auto = view.windows.get('gone/app/2')
+  view.put({ ...auto, point: { x: 0.5, y: 0.5 } }, true)
+  rows = []
+  const start = scans
+  for (let i = 0; i < 100 && scans < start + 1; i++) await new Promise(resolve => setTimeout(resolve, 5))
+  assert.ok(scans >= start + 1)
+  let items = (await reader.next()).value
+  for (const item of items) { assert.equal(item.point, undefined); assert.ok(item.image) }
+  assert.equal(items.find(item => item.id.endsWith('/1')).windowUnavailable, true)
+  assert.ok(items.some(item => item.id.endsWith('/2')))
+  for (let i = 0; i < 100 && scans < start + 2; i++) await new Promise(resolve => setTimeout(resolve, 5))
+  assert.ok(scans >= start + 2)
+  items = (await reader.next()).value
+  assert.ok(items.some(item => item.id.endsWith('/2')))
+  assert.ok(items.every(item => item.point === undefined && item.image))
+  controller.abort(); await reader.return(); preview.close(); view.close()
+})

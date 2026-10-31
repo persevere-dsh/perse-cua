@@ -972,3 +972,41 @@ test('automatically removed window IDs can be reused at a different size', { ski
     controller.abort(); await reader.return(); await consume
   } finally { await ctx.fiber.dispose(); await closeHost(); await rm(root, { recursive: true, force: true }) }
 })
+
+test('slow preview subscriber receives the click frame before the newer capture', { skip: process.platform !== 'darwin' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'perse-click-stream-')), helper = join(root, 'native-helper.mjs')
+  await writeFile(helper, await readFile(new URL('./fixtures/native-helper.mjs', import.meta.url)), { mode: 0o700 })
+  await writeFile(join(root, 'observe-helper'), '')
+  const closeHost = await startFixtureHost(helper, { prestart: true }), ctx = new Context()
+  try {
+    for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess]) await ctx.plugin(plugin)
+    ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
+    ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] } } })
+    ctx.loader.builtins.perse = Main
+    await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper, allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }] } })
+    await ctx.loader.await()
+    const agent = { id: 'click-stream', ctx }; ctx.agents.get = id => id === agent.id ? agent : undefined
+    let sequence = 0
+    const call = (method, params) => ctx.tools.execute({ name: 'cua', arguments: { method, params }, agent, callId: `click-stream-${++sequence}`, signal: new AbortController().signal })
+    const app = await call('getApp', { selector: 'Fixture' }); assert.equal(app.isError, false)
+    const handle = app.value.appHandle
+    assert.equal((await call('getState', { appHandle: handle, windowId: 7 })).isError, false)
+    const view = ctx.get('perseCuaView'), reader = view.watch(agent.id, new AbortController().signal)[Symbol.asyncIterator]()
+    let initial
+    while (!initial?.image) initial = (await reader.next()).value.find(item => item.id.endsWith('/7'))
+    let pointPublished = false, capturePublished = false
+    const put = view.put.bind(view)
+    view.put = (item, freshPoint) => { if (item.point) pointPublished = true; else if (pointPublished && item.image) capturePublished = true; put(item, freshPoint) }
+    assert.equal((await call('click', { appHandle: handle, windowId: 7, x: 250, y: 500, relative: true })).isError, false)
+    for (let i = 0; i < 100 && !capturePublished; i++) await delay(5)
+    assert.equal(pointPublished, true); assert.equal(capturePublished, true)
+    assert.deepEqual((await reader.next()).value.find(item => item.id.endsWith('/7')).point, { x: 0.25, y: 0.5 })
+    assert.equal((await reader.next()).value.find(item => item.id.endsWith('/7')).point, undefined)
+    assert.equal((await call('click', { appHandle: handle, windowId: 7, x: 250, y: 500, relative: true })).isError, false)
+    await ctx.emit('tools/result', { name: 'cua', agent, arguments: { method: 'listWindows', params: { appHandle: handle } } },
+      { isError: false, value: [{ windowId: 7, title: 'Fixture', isOnScreen: false, bounds: { x: 10, y: 20, width: 400, height: 300 } }] })
+    const hidden = (await reader.next()).value.find(item => item.id.endsWith('/7'))
+    assert.equal(hidden.windowUnavailable, true); assert.equal(hidden.point, undefined)
+    await reader.return()
+  } finally { await ctx.fiber.dispose(); await closeHost() }
+})

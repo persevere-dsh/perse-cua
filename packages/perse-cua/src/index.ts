@@ -356,7 +356,7 @@ export const apply = (ctx: Context & { tools: { register: (definition: unknown) 
     clearPointTimer(id)
     const current = ++revision
     previews.set(id, { item, revision: current })
-    view.put(item)
+    view.put(item, !!point)
     if (point) {
       pointTimers.set(id, setTimeout(() => {
         pointTimers.delete(id)
