@@ -23,10 +23,12 @@ test('real preview component switches, expands, closes and reports a failed clos
     inject: (_deps, fn) => ({ await: async () => {}, dispose: fn(child) }),
   }
   await client.apply(ctx)
-  const useSessions = select => select({ byId: { bench: { id: 'bench', retainedBy: { mainView: 1 } } } })
+  let session = 'bench'
+  const useSessions = select => select({ byId: { [session]: { id: session, retainedBy: { mainView: 1 } } } })
+  const element = () => React.createElement(View, { t: key => key, useSessions })
   let root
   try {
-    await act(async () => { root = TestRenderer.create(React.createElement(View, { t: key => key, useSessions })) })
+    await act(async () => { root = TestRenderer.create(element()) })
     const section = () => root.root.findByType('section')
     const control = title => root.root.findAllByType('button').find(button => button.props.title === title)
     assert.equal(section().props['aria-label'], 'Red')
@@ -42,6 +44,27 @@ test('real preview component switches, expands, closes and reports a failed clos
     await act(async () => { await control('close').props.onClick() })
     assert.deepEqual(fixture.snapshot().map(item => item.title), ['Red', 'Blue'])
     assert.equal(root.root.findAllByProps({ className: 'cua-warning-button' }).length, 0)
+    await act(async () => { fixture.addFourth() })
+    assert.equal(root.root.findAllByProps({ className: 'cua-back' }).length, 2)
+    await act(async () => { fixture.status('bench/app/1', 'offscreen') })
+    assert.equal(root.root.findAllByProps({ className: 'cua-warning-button' }).length, 1)
+    assert.equal(root.root.findAllByProps({ className: 'cua-preview' }).length, 1)
+    await act(async () => { fixture.status('bench/app/1', 'failed') })
+    assert.equal(root.root.findAllByProps({ className: 'cua-preview' }).length, 0)
+    const placeholder = () => root.root.findAll(node => node.props.style?.placeItems === 'center')[0]
+    assert.deepEqual(placeholder().children, ['unavailable'])
+    await act(async () => { fixture.status('bench/app/1', 'offscreen-empty') })
+    assert.deepEqual(placeholder().children, ['windowHidden'])
+    await act(async () => { fixture.status('bench/app/1', 'waiting') })
+    assert.deepEqual(placeholder().children, ['waiting'])
+    await act(async () => { fixture.status('bench/app/1', 'ok') })
+    assert.equal(root.root.findAllByProps({ className: 'cua-preview' }).length, 1)
+    await act(async () => { session = 'other'; root.update(element()) })
+    assert.equal(section().props['aria-label'], 'Purple')
+    await act(async () => { fixture.disconnect('other') })
+    assert.equal(root.root.findAllByType('section').length, 0)
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 1100)) })
+    assert.equal(section().props['aria-label'], 'Purple')
   } finally {
     if (root) await act(async () => root.unmount())
     await cleanup()

@@ -10,11 +10,17 @@ struct AXHoverAccess<Node> {
     let perform: (Node, String) throws -> Void
 }
 
+enum AXHoverOutcome: Equatable {
+    case revealed
+    case retained
+    case unsupported
+}
+
 /// Tracks the alternate UI owned by one connection and restores it when leaving.
 final class AXHoverState<Node> {
     private var revealed: (element: Node, windowID: UInt32)?
 
-    func move(to target: Node?, windowID: UInt32, access: AXHoverAccess<Node>) throws -> Bool {
+    func move(to target: Node?, windowID: UInt32, access: AXHoverAccess<Node>) throws -> AXHoverOutcome {
         var current = target
         var visited: [Node] = []
         var alternate: Node?
@@ -23,7 +29,7 @@ final class AXHoverState<Node> {
                 throw NativeFailure(code: "NATIVE_ERROR", message: "Accessibility hover ancestry contains a cycle; read fresh state")
             }
             visited.append(node)
-            if let revealed, revealed.windowID == windowID, access.equal(revealed.element, node) { return true }
+            if let revealed, revealed.windowID == windowID, access.equal(revealed.element, node) { return .retained }
             let actions = try access.actions(node)
             if alternate == nil, actions.contains("AXShowAlternateUI"), actions.contains("AXShowDefaultUI"),
                try access.enabled(node) != false { alternate = node }
@@ -38,9 +44,9 @@ final class AXHoverState<Node> {
         if let alternate {
             try access.perform(alternate, "AXShowAlternateUI")
             revealed = (alternate, windowID)
-            return true
+            return .revealed
         }
-        return false
+        return .unsupported
     }
 }
 
@@ -48,7 +54,7 @@ final class AXHover {
     private let state = AXHoverState<AXUIElement>()
 
     /// Entering revealed descendants preserves their parent UI; leaving restores it once.
-    func move(to target: AXUIElement?, in route: WindowRoute, access: AXAccess) throws -> Bool {
+    func move(to target: AXUIElement?, in route: WindowRoute, access: AXAccess) throws -> AXHoverOutcome {
         try state.move(to: target, windowID: route.windowID, access: AXHoverAccess(
             equal: { CFEqual($0, $1) }, actions: { try access.actions($0) },
             role: { try access.string($0, "AXRole") }, parent: { try access.element($0, "AXParent") },

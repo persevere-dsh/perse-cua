@@ -17,6 +17,22 @@ test('fixture streams three windows, updates frames and sizes, and handles dismi
   const next = reader.next(); await stream.dispose(); assert.equal((await next).done, true)
 })
 
+test('fixture isolates sessions and controls slow frames, failures and stream endings', async () => {
+  const fixture = createPreviewFixture((title, frame, width, height) => `${title}:${frame}:${width}x${height}`)
+  const first = fixture.watch('bench'), a = first[Symbol.asyncIterator]()
+  const other = fixture.watch('other'), b = other[Symbol.asyncIterator]()
+  assert.equal((await a.next()).value.length, 3)
+  assert.deepEqual((await b.next()).value.map(item => item.title), ['Purple'])
+  fixture.addFourth(); assert.equal((await a.next()).value.length, 4)
+  fixture.queueFrame('bench/app/1'); fixture.frame('bench/app/1'); fixture.frame('bench/app/1')
+  assert.match((await a.next()).value[0].image, /Red:2:/)
+  fixture.releaseFrame(); assert.match((await a.next()).value[0].image, /Red:2:/)
+  fixture.status('bench/app/1', 'failed'); assert.equal((await a.next()).value[0].image, undefined)
+  fixture.status('bench/app/1', 'offscreen'); assert.equal((await a.next()).value[0].windowUnavailable, true)
+  const done = a.next(); fixture.disconnect('bench'); assert.equal((await done).done, true)
+  await other.dispose(); await b.return()
+})
+
 test('bench serves the built client only on loopback', async t => {
   const bench = await startBench(); t.after(() => bench.close())
   assert.match(bench.url, /^http:\/\/127\.0\.0\.1:\d+\/$/)

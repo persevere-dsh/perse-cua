@@ -258,6 +258,15 @@ test('native preview captures an authorized window without changing model coordi
     assert.equal(app.isError, false)
     const state = await call('getState', JSON.stringify({ appHandle: app.value.appHandle, windowId: 7 }))
     assert.equal(state.isError, false)
+    const hoverTarget = { appHandle: app.value.appHandle, snapshotId: state.value.snapshotId, elementIndex: 0 }
+    const reveal = await call('hover', hoverTarget)
+    assert.equal(reveal.isError, false)
+    assert.equal(reveal.value.dispatched, true)
+    const retained = await call('hover', hoverTarget)
+    assert.equal(retained.isError, false)
+    assert.equal(retained.value.dispatched, false)
+    assert.equal(retained.value.verified, false)
+    assert.equal(retained.value.hoverRoute, 'accessibility')
     const view = ctx.get('perseCuaView'); const reader = view.watch(agent.id, new AbortController().signal)[Symbol.asyncIterator]()
     let items = (await reader.next()).value
     if (!items[0]?.image) items = (await reader.next()).value

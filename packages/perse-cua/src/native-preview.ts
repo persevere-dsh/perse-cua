@@ -169,6 +169,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
       }
       for (const [windowId, old] of app.windows) if (!seen.has(windowId)) { const item = { ...old, windowUnavailable: true }; app.windows.set(windowId, item); view.put(item) }
     }
+    if (method === 'listWindows') return
     const selected = typeof value?.windowId === 'number' ? value.windowId : typeof params.windowId === 'number' ? params.windowId : typeof params.snapshotId === 'string' && app.snapshots.has(params.snapshotId) ? app.snapshots.get(params.snapshotId) : typeof value?.focusedWindowId === 'number' ? value.focusedWindowId : app.selected
     if (selected === undefined) return
     if (method === 'getState' && !result.isError) {

@@ -393,24 +393,16 @@ actor AXWorker {
                     let action: String? = !modifiers.isEmpty ? nil : button == "right" && names.contains("AXShowMenu") ? "AXShowMenu"
                         : (button == "left" && count == 1 ? (names.contains("AXPress") ? "AXPress" : names.contains("AXPick") ? "AXPick" : nil) : nil)
                     if let action {
-                        // AX actions can succeed without geometry; only draw when a usable target exists.
-                        let visualTarget: (WindowRoute, WindowPoint)?
-                        if let bounds = try? ax().bounds(selected), bounds.width > 0, bounds.height > 0,
-                           let ownerWindow = try? ax().enclosingWindow(selected, owner: identity) {
+                        try await performAXClick(resolve: {
+                            guard let bounds = try? self.ax().bounds(selected), bounds.width > 0, bounds.height > 0,
+                                  let ownerWindow = try? self.ax().enclosingWindow(selected, owner: identity) else { return nil }
                             let route = WindowRoute(owner: identity, windowID: ownerWindow.windowID, bounds: ownerWindow.bounds)
                             let point = WindowPoint(x: bounds.x + bounds.width / 2 - ownerWindow.bounds.x,
                                                     y: bounds.y + bounds.height / 2 - ownerWindow.bounds.y)
-                            visualTarget = (try? WindowPointerInput.validate(point, in: route)) == nil ? nil : (route, point)
-                        } else { visualTarget = nil }
-                        if let (route, point) = visualTarget {
-                            do { try await planPointer(route, point) }
-                            catch { try cancellation.check() }
-                            try cancellation.check()
-                        }
-                        try ax().perform(selected, action)
-                        if let (route, point) = visualTarget {
-                            didPostClick(route, CGPoint(x: route.bounds.x + point.x, y: route.bounds.y + point.y))
-                        }
+                            guard (try? WindowPointerInput.validate(point, in: route)) != nil else { return nil }
+                            return AXClickVisualTarget(route: route, point: point)
+                        }, plan: self.planPointer, checkCancellation: { try self.cancellation.check() },
+                           perform: { try self.ax().perform(selected, action) }, mark: self.didPostClick)
                         return .result(Self.actionResult)
                     }
                     try ax().requireEnabled(selected)
@@ -433,7 +425,7 @@ actor AXWorker {
                 }
                 let hover = hovers[handle] ?? AXHover()
                 hovers[handle] = hover
-                return .result(try Self.hoverResult(handled: hover.move(to: hoverElement, in: route, access: ax())))
+                return .result(try Self.hoverResult(outcome: hover.move(to: hoverElement, in: route, access: ax())))
             }
             try await prepare(route, point: point)
             try inputs().1.click(in: route, at: point, button: button, count: count, modifiers: modifiers)
@@ -544,11 +536,11 @@ actor AXWorker {
             "pixelWidth": .number(Double(image.width)), "pixelHeight": .number(Double(image.height)), "bounds": after.bounds.json,
             "coordinateSpace": .string("window-points"), "windowId": .number(Double(after.windowID))])
     }
-    static func hoverResult(handled: Bool) throws -> JSONValue {
-        guard handled else {
+    static func hoverResult(outcome: AXHoverOutcome) throws -> JSONValue {
+        guard outcome != .unsupported else {
             throw NativeFailure(code: "UNSUPPORTED", message: "Background hover requires accessibility alternate UI; use an advertised accessibility action or operate the control manually. 后台悬停需要辅助功能替代界面；请使用已声明的辅助功能操作或手动操作控件。")
         }
-        return .object(["dispatched": .bool(true), "verified": .bool(false), "hoverRoute": .string("accessibility"), "systemPointerMoved": .bool(false)])
+        return .object(["dispatched": .bool(outcome == .revealed), "verified": .bool(false), "hoverRoute": .string("accessibility"), "systemPointerMoved": .bool(false)])
     }
     func shutdown() { closed = true; snapshots.removeAll(); observedWindowBounds.removeAll(); targets.removeAll(); hovers.removeAll(); access = nil; keyboard = nil; pointer = nil }
 }

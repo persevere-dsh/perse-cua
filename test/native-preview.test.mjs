@@ -124,6 +124,22 @@ test('a dismissed window can reappear on a later operation', async () => {
   preview.close()
 })
 
+test('listing windows does not reopen a dismissed selected preview', () => {
+  const listeners = new Map(), windows = new Map()
+  const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+  const view = { setDismissHandler(fn) { this.dismiss = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+  const preview = observeNative(ctx, view), agent = { id: 'a' }
+  const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  emit('getApp', {}, { appHandle: 'app', name: 'Fixture' })
+  emit('getState', { appHandle: 'app', windowId: 1 }, { windowId: 1, windows: [{ windowId: 1, title: 'One', isOnScreen: true }] })
+  view.dismiss('a/app/1'); view.remove('a/app/1')
+  emit('listWindows', { appHandle: 'app' }, [{ windowId: 1, title: 'One', isOnScreen: true }])
+  assert.equal(windows.has('a/app/1'), false)
+  emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'YWJj', mimeType: 'image/png' })
+  assert.equal(windows.get('a/app/1').image, 'data:image/png;base64,YWJj')
+  preview.close()
+})
+
 test('a denied preview capture clears an earlier image', async () => {
   const listeners = new Map(), windows = new Map()
   const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
@@ -417,4 +433,43 @@ test('continuous refresh recovers visibility and superseded slow captures withou
   assert.ok(events.some(event => event[0] === 'capture' && event[1] === '2:600'))
   assert.ok(events.some(event => event[0] === 'capture' && event[1] === '3:700'))
   preview.close()
+})
+
+test('display-only discovery keeps tiny windows, ignores transient and hidden rows, and isolates owners', async () => {
+  const listeners = new Map(), windows = new Map(), scans = new Map(), captures = []
+  const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+  const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+  const preview = observeNative(ctx, view, { intervalMs: 10 })
+  const a = { id: 'session-a' }, b = { id: 'session-b' }
+  const row = (windowId, title, width, height, extra = {}) => ({ windowId, title, bounds: { width, height }, isOnScreen: true, onCurrentSpace: true, ...extra })
+  const list = owner => async handle => {
+    const key = `${owner.id}/${handle}`; const count = (scans.get(key) ?? 0) + 1; scans.set(key, count)
+    if (owner === b) return [row(1, 'Other session', 200, 100)]
+    if (handle === 'second') return [row(1, 'Other app', 240, 120)]
+    return [row(1, 'Normal', 600, 400), row(2, 'Small legitimate window', 1, 1),
+      ...(count === 1 ? [row(3, 'Transient', 90, 50)] : []),
+      row(4, 'Zero width', 0, 50), row(5, 'Off-screen', 100, 100, { isOnScreen: false }),
+      row(6, 'Other space', 100, 100, { onCurrentSpace: false })]
+  }
+  const capture = owner => async (handle, windowId) => {
+    const tag = `${owner.id}/${handle}/${windowId}`; captures.push(tag)
+    return { windowId, data: Buffer.from(tag).toString('base64'), mimeType: 'image/png' }
+  }
+  const app = (agent, handle, name) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: handle, name } })
+  const until = async predicate => { for (let i = 0; i < 200 && !predicate(); i++) await new Promise(resolve => setTimeout(resolve, 5)); assert.ok(predicate(), 'discovery timed out') }
+  try {
+    preview.hooks.onClient(a, capture(a), list(a)); preview.hooks.onClient(b, capture(b), list(b))
+    app(a, 'first', 'First'); app(a, 'second', 'Second'); app(b, 'first', 'Third')
+    view.watch('session-a', true)
+    await until(() => ['session-a/first/1', 'session-a/first/2', 'session-a/second/1'].every(id => windows.get(id)?.image))
+    assert.deepEqual([...windows.keys()].sort(), ['session-a/first/1', 'session-a/first/2', 'session-a/second/1'])
+    assert.equal(scans.has('session-b/first'), false)
+    view.watch('session-b', true)
+    await until(() => windows.get('session-b/first/1')?.image)
+    for (const id of ['session-a/first/1', 'session-a/first/2', 'session-a/second/1', 'session-b/first/1']) {
+      assert.equal(windows.get(id).image, `data:image/png;base64,${Buffer.from(id).toString('base64')}`)
+    }
+    assert.ok(captures.includes('session-a/first/2'))
+    assert.equal(windows.has('session-a/first/3'), false)
+  } finally { preview.close() }
 })

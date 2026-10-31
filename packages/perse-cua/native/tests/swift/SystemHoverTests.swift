@@ -11,14 +11,21 @@ import CoreGraphics
 
 @Test func unavailableAccessibilityHoverFailsWithoutPointerFallback() throws {
     do {
-        _ = try AXWorker.hoverResult(handled: false)
+        _ = try AXWorker.hoverResult(outcome: .unsupported)
         Issue.record("Missing alternate UI must fail")
     } catch let failure as NativeFailure {
         #expect(failure.code == "UNSUPPORTED")
         #expect(failure.message.contains("后台悬停"))
     }
-    #expect(try AXWorker.hoverResult(handled: true) == .object([
+    #expect(try AXWorker.hoverResult(outcome: .revealed) == .object([
         "dispatched": .bool(true), "verified": .bool(false),
+        "hoverRoute": .string("accessibility"), "systemPointerMoved": .bool(false),
+    ]))
+}
+
+@Test func retainedAlternateHoverDoesNotClaimAnotherDispatch() throws {
+    #expect(try AXWorker.hoverResult(outcome: .retained) == .object([
+        "dispatched": .bool(false), "verified": .bool(false),
         "hoverRoute": .string("accessibility"), "systemPointerMoved": .bool(false),
     ]))
 }

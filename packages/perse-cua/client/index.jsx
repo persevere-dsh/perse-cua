@@ -4,8 +4,8 @@ import remote from '../lib/typert.remote-client.js'
 export const inject = ['remote', 'slots', 'locale']
 const h = React.createElement
 const labels = {
-  zh: { close: '关闭预览', expand: '放大窗口', collapse: '收起', waiting: '等待截图', failed: '操作失败', window: '窗口', captured: '上次截图', position: '动作位置', unavailable: '截图不可用', windowUnavailable: '窗口不可见 · 上次画面', working: '正在操作', click: '点击', move_cursor: '移动光标', get_window_state: '查看窗口', other: '操作', switchTo: '切换到窗口', issues: '预览状态异常' },
-  en: { close: 'Close preview', expand: 'Expand window', collapse: 'Collapse', waiting: 'Waiting for screenshot', failed: 'Action failed', window: 'Window', captured: 'Last screenshot', position: 'Action position', unavailable: 'Screenshot unavailable', windowUnavailable: 'Window not visible · last image', working: 'Working', click: 'Click', move_cursor: 'Move cursor', get_window_state: 'View window', other: 'Action', switchTo: 'Switch to window', issues: 'Preview status issues' },
+  zh: { close: '关闭预览', expand: '放大窗口', collapse: '收起', waiting: '等待截图', failed: '操作失败', window: '窗口', captured: '上次截图', position: '动作位置', unavailable: '截图不可用', windowUnavailable: '窗口不可见 · 上次画面', windowHidden: '窗口不可见', working: '正在操作', click: '点击', move_cursor: '移动光标', get_window_state: '查看窗口', other: '操作', switchTo: '切换到窗口', issues: '预览状态异常' },
+  en: { close: 'Close preview', expand: 'Expand window', collapse: 'Collapse', waiting: 'Waiting for screenshot', failed: 'Action failed', window: 'Window', captured: 'Last screenshot', position: 'Action position', unavailable: 'Screenshot unavailable', windowUnavailable: 'Window not visible · last image', windowHidden: 'Window not visible', working: 'Working', click: 'Click', move_cursor: 'Move cursor', get_window_state: 'View window', other: 'Action', switchTo: 'Switch to window', issues: 'Preview status issues' },
 }
 const icon = (name) => h('svg', { width: 15, height: 15, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, h('path', { d: name === 'close' ? 'M18 6 6 18M6 6l12 12' : name === 'expand' ? 'M14 4h6v6M20 4l-7 7M10 20H4v-6M4 20l7-7' : name === 'next' ? 'M20 7v5h-5M20 12a8 8 0 1 0-2.3 5.7' : 'M4 14h6v6M10 14l-6 6M20 10h-6V4M14 10l6-6' }))
 const backdrop = image => ({ position: 'absolute', inset: 0, backgroundImage: `url(${image})`, backgroundPosition: 'center', backgroundSize: 'cover', filter: 'blur(18px)', transform: 'scale(1.2)', opacity: 0.25, pointerEvents: 'none' })
@@ -30,7 +30,7 @@ function PreviewImage({ item, selected, t, toggle }) {
     } else if (!timer.current) setFrame(item)
   }, [item])
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current) }, [])
-  if (!validImage(frame.image)) return h('div', { style: { display: 'grid', placeItems: 'center', height: 'var(--cua-card-height)' } }, t('waiting'))
+  if (!validImage(frame.image)) return h('div', { style: { display: 'grid', placeItems: 'center', height: 'var(--cua-card-height)' } }, t(frame.windowUnavailable ? 'windowHidden' : frame.previewUnavailable ? 'unavailable' : 'waiting'))
   const point = frame.point && Number.isFinite(frame.point.x) && Number.isFinite(frame.point.y) && frame.point.x >= 0 && frame.point.x <= 1 && frame.point.y >= 0 && frame.point.y <= 1
   return h('button', { className: 'cua-preview', type: 'button', onClick: toggle, 'aria-label': `${selected ? t('collapse') : t('expand')} · ${frame.title}${frame.capturedAt ? ` · ${t('captured')} ${new Date(frame.capturedAt).toLocaleTimeString()}` : ''}`, style: { position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', height: 'var(--cua-card-height)', padding: 0, border: 0, borderRadius: 10, overflow: 'hidden', background: 'transparent', cursor: selected ? 'zoom-out' : 'zoom-in' } },
     h('span', { 'aria-hidden': true, style: backdrop(frame.image) }),

@@ -791,6 +791,7 @@ const ActionResult = z.object({
 	verified: z.literal(false)
 });
 ActionResult.extend({
+	dispatched: z.boolean(),
 	hoverRoute: z.enum(["accessibility"]),
 	systemPointerMoved: z.boolean()
 });

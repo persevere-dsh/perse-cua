@@ -195,12 +195,13 @@ function createApplicationState(socket, record, application, captureBroker, conn
       if (!observed) refuse('STALE_SNAPSHOT', 'Read fresh state before acting')
       if (params.windowId !== undefined && observed.windowId !== null && observed.windowId !== params.windowId) refuse('STALE_SNAPSHOT', 'Snapshot belongs to another window')
       if (observed.axless && params.elementIndex !== undefined) refuse('INVALID_ARGUMENT', 'Element index is absent from the selected snapshot')
+      const wasHovering = application.hovering
       if (method === 'hover') application.hovering = params.elementIndex === 0 || (params.x >= 20 && params.x <= 40)
       else if (method === 'click' && params.windowId === 8) application.visualCount++
       else if (method === 'click') application.count++
       else application.value = params.value
       record('state', { count: application.count, value: application.value, visualCount: application.visualCount })
-      return { dispatched: true, verified: false, ...method === 'hover' ? { hoverRoute: 'accessibility', systemPointerMoved: false } : {} }
+      return { dispatched: method !== 'hover' || !wasHovering || !application.hovering, verified: false, ...method === 'hover' ? { hoverRoute: 'accessibility', systemPointerMoved: false } : {} }
     }
     if (method === 'pressKey' && params.key === 'Return') observationChanged = true
     // Fixture-only keys simulate a pending system callback and its eventual completion.

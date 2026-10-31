@@ -19,21 +19,21 @@ private final class HoverFixture {
 
 @Test func alternateHoverPreservesDescendantsAndRestoresOnceOnExit() throws {
     let fixture = HoverFixture(), hover = AXHoverState<Int>()
-    #expect(try hover.move(to: 1, windowID: 7, access: fixture.access))
-    #expect(try hover.move(to: 2, windowID: 7, access: fixture.access))
-    #expect(try !hover.move(to: 3, windowID: 7, access: fixture.access))
-    #expect(try !hover.move(to: 3, windowID: 7, access: fixture.access))
+    #expect(try hover.move(to: 1, windowID: 7, access: fixture.access) == .revealed)
+    #expect(try hover.move(to: 2, windowID: 7, access: fixture.access) == .retained)
+    #expect(try hover.move(to: 3, windowID: 7, access: fixture.access) == .unsupported)
+    #expect(try hover.move(to: 3, windowID: 7, access: fixture.access) == .unsupported)
     #expect(fixture.actions == ["1:AXShowAlternateUI", "1:AXShowDefaultUI"])
 }
 
 @Test func alternateHoverDoesNotUseDisabledActionsAndHandlesWindowChanges() throws {
     let fixture = HoverFixture(), hover = AXHoverState<Int>()
     fixture.disabled.insert(1)
-    #expect(try !hover.move(to: 1, windowID: 7, access: fixture.access))
+    #expect(try hover.move(to: 1, windowID: 7, access: fixture.access) == .unsupported)
     #expect(fixture.actions.isEmpty)
     fixture.disabled.remove(1)
-    #expect(try hover.move(to: 1, windowID: 7, access: fixture.access))
-    #expect(try hover.move(to: 1, windowID: 8, access: fixture.access))
+    #expect(try hover.move(to: 1, windowID: 7, access: fixture.access) == .revealed)
+    #expect(try hover.move(to: 1, windowID: 8, access: fixture.access) == .revealed)
     #expect(fixture.actions == ["1:AXShowAlternateUI", "1:AXShowDefaultUI", "1:AXShowAlternateUI"])
 }
 
@@ -46,16 +46,35 @@ private final class HoverFixture {
     #expect(throws: NativeFailure.self) { try hover.move(to: 1, windowID: 7, access: fixture.access) }
     #expect(fixture.actions == ["1:AXShowAlternateUI"])
     fixture.fail = nil
-    #expect(try !hover.move(to: 0, windowID: 7, access: fixture.access))
+    #expect(try hover.move(to: 0, windowID: 7, access: fixture.access) == .unsupported)
     #expect(fixture.actions == ["1:AXShowAlternateUI"])
 }
 
 @Test func failedRestoreRetainsOwnershipForAConfirmedRetry() throws {
     let fixture = HoverFixture(), hover = AXHoverState<Int>()
-    #expect(try hover.move(to: 1, windowID: 7, access: fixture.access))
+    #expect(try hover.move(to: 1, windowID: 7, access: fixture.access) == .revealed)
     fixture.fail = "AXShowDefaultUI"
     #expect(throws: NativeFailure.self) { try hover.move(to: 3, windowID: 7, access: fixture.access) }
     fixture.fail = nil
-    #expect(try !hover.move(to: 3, windowID: 7, access: fixture.access))
+    #expect(try hover.move(to: 3, windowID: 7, access: fixture.access) == .unsupported)
     #expect(fixture.actions == ["1:AXShowAlternateUI", "1:AXShowDefaultUI", "1:AXShowDefaultUI"])
+}
+
+@Test func failedNextRevealDoesNotRepeatThePreviousRestore() throws {
+    let fixture = HoverFixture(), hover = AXHoverState<Int>()
+    fixture.alternatives.insert(3)
+    #expect(try hover.move(to: 1, windowID: 7, access: fixture.access) == .revealed)
+    fixture.fail = "AXShowAlternateUI"
+    #expect(throws: NativeFailure.self) { try hover.move(to: 3, windowID: 7, access: fixture.access) }
+    fixture.fail = nil
+    #expect(try hover.move(to: 3, windowID: 7, access: fixture.access) == .revealed)
+    #expect(fixture.actions == ["1:AXShowAlternateUI", "1:AXShowDefaultUI", "3:AXShowAlternateUI", "3:AXShowAlternateUI"])
+}
+
+@Test func releasingHoverStateDoesNotRestoreAnApplicationUIWithoutOwnership() throws {
+    let fixture = HoverFixture()
+    var hover: AXHoverState<Int>? = AXHoverState<Int>()
+    #expect(try hover?.move(to: 1, windowID: 7, access: fixture.access) == .revealed)
+    hover = nil
+    #expect(fixture.actions == ["1:AXShowAlternateUI"])
 }

@@ -193,7 +193,7 @@ def main():
             assert result == {'dispatched': True, 'verified': False, 'hoverRoute': 'accessibility', 'systemPointerMoved': False}, result
             wait_for(lambda: json.loads(state_path.read_text())['alternateShown'], 'AX alternate reveal')
             result = call('hover', target('Alternate child'))
-            assert result['hoverRoute'] == 'accessibility' and result['systemPointerMoved'] is False, result
+            assert result == {'dispatched': False, 'verified': False, 'hoverRoute': 'accessibility', 'systemPointerMoved': False}, result
             call('click', target('Alternate child'))
             wait_for(lambda: json.loads(state_path.read_text())['clicks'] == 1, 'AX child click')
             before = json.loads(state_path.read_text())
