@@ -4,18 +4,17 @@ English | [中文](README.zh.md)
 
 `perse` = persevere
 
-Front [cua-driver](https://github.com/trycua/cua)'s desktop-automation tools to a DSH model
-without paying for the parts a session never uses.
+Desktop automation for DSH: macOS defaults to the native `cua` tool; other platforms default to [cua-driver](https://github.com/trycua/cua) MCP.
 
 **Part of Persevere with DSH**
 
 -----
 
-On macOS 14 or later the default backend is the experimental DSH native provider. It asks for application consent and requires the host to provide the DSH 0.2.1-rc.2 services. Its preview captures authorized windows after observed operations without changing model screenshot coordinates. The combined native GUI, consent and cursor experience has not been verified. The driver measurements and behavior below apply to `backend: mcp`.
+On macOS 14 or later the default backend is the experimental DSH native provider. The model uses the registered `cua` tool and its per-application authorization flow directly; it supports background AX operations and screenshots, but not typed browser tabs. For those, explicitly configure the MCP backend and follow its authorization; never switch providers to bypass denied or revoked access. It asks for application consent and requires the host to provide the DSH 0.2.1-rc.2 services. Its preview captures authorized windows after observed operations without changing model screenshot coordinates. The combined native GUI, consent and cursor experience has not been verified. The driver measurements and behavior below apply to `backend: mcp`.
 
 Existing macOS configurations with MCP-specific options such as `command`, `args`, `allow`, or `indicator` must add `backend: mcp`; without it startup reports an error instead of silently selecting the external driver. Profiles with an existing native provider can use `presenterOnly: true` to expose the view service, but automatic native previews require this plugin to own the provider and its authorization lifecycle.
 
-## What it solves
+## What the MCP backend solves
 
 cua-driver 0.28.1 advertises **56 tools**. Every one of them is attached to *every*
 model request whether or not the task touches a GUI. Measured on the released driver:
@@ -30,12 +29,10 @@ And once a task *is* driving an app, a raw window snapshot is mostly menu bar: o
 rendered bytes**. It can never be an automation target — menu items are reached with
 `invoke_menu` by path — so it is pure grounding noise.
 
-## What it does
+## What the MCP backend does
 
 1. **Condenses descriptions** to their first sentence — this is where the default saving
-   comes from. The full operating procedure is not lost: it already ships as the
-   `cua-driver` skill, which the model loads on demand. Parameter schemas pass through
-   untouched, so every tool still validates.
+   comes from. Parameter schemas pass through untouched, so every tool still validates.
 2. **Denies only proven waste.** With `bestExperience` on (the default) the default
    `deny` list is the three tools that cannot change a task outcome: the
    `check_for_update` probe and the two deprecated compatibility shims
@@ -76,13 +73,14 @@ If request size matters more than reach, opt in to the aggressive cut explicitly
 ```yaml
 - id: perse-cua
   config:
+    backend: mcp
     allow: !!js (await import('perse-cua')).MINIMAL_ALLOW
 ```
 
 ## Use this plugin
 
 `perse-cua` ships `dsh.bundle.patch`, so installing it already registers its loader row.
-Add a **config override** — not a second `insert`, which would collide on the loader id
+The macOS default needs no backend override. To select the external MCP driver, add a **config override** — not a second `insert`, which would collide on the loader id
 (preflight rule R-07):
 
 ```yaml

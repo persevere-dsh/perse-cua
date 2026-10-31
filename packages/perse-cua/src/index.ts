@@ -1,27 +1,7 @@
 /**
- * `perse-cua` — put cua-driver's desktop-automation tools in front of the model
- * without paying for the parts a session never uses.
- *
- * Why this exists rather than a plain `dsh-mcp-client` row: cua-driver 0.28.1
- * advertises 56 tools whose model-facing schema (name + description +
- * inputSchema) measured 93 KB — roughly 23K tokens attached to *every* request,
- * whether or not the task touches the GUI. Two thirds of that is prose the model
- * does not need inline, because the full operating procedure already ships as the
- * `cua-driver` skill and can be loaded on demand. This plugin therefore:
- *
- * 1. curates the surface to the desktop-automation loop (`curate.ts`);
- * 2. condenses each tool description to its first sentence, leaving the schema
- *    untouched so every parameter still validates;
- * 3. strips the accessibility menu bar out of rendered trees (`trim.ts`), which
- *    on a small window is ~84% of the lines and never an automation target;
- * 4. turns on the macOS best experience by default (`bestExperience`): the four
- *    agent-cursor tools stay in the surface and a named session shows the visible
- *    agent cursor at boot — Codex-style background driving the user can watch.
- *
- * It owns the MCP connection itself instead of wrapping `dsh-mcp-client` because
- * the harness exposes no result-projection hook: `tools.restrict()` requires an
- * agent-scoped context and cannot mask a surface at plugin load, and the generic
- * bridge renders straight from the MCP text.
+ * Desktop automation for DSH. On macOS the default provider registers the
+ * native `cua` tool. The MCP backend connects to an external cua-driver,
+ * curates its tools, and projects results to the harness.
  *
  * @module perse-cua
  */

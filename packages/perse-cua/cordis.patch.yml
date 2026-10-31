@@ -5,10 +5,10 @@
 # own cordis.patch.yml; do ONE of the two, never both — the loader id must be
 # unique (preflight rule R-07).
 #
-# This row REPLACES a plain `@deepseek-ai/dsh-mcp-client` row for cua-driver:
-# it owns the MCP stdio connection itself so it can curate the tool surface and
-# project results. Do not run both against the same driver.
+# On macOS this row defaults to the native `cua` provider. On other platforms,
+# or with `backend: mcp`, it owns the external driver connection. Do not add a
+# second MCP row for the same driver.
 - insert:
     - id: perse-cua
       name: perse-cua
-      description: cua-driver desktop automation — curated tool surface, condensed schemas, menu-free accessibility trees
+      description: Desktop automation with native macOS and external MCP backends

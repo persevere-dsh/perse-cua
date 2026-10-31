@@ -88,7 +88,6 @@
   "license": "MIT",
   "dependencies": {
     "@deepseek-ai/dsh-computer-use": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-experimental-cua-macos": "0.2.1-rc.2",
     "@deepseek-ai/schemastery": "3.18.5",
     "zod": "^4.6.7",
     "@deepseek-ai/dsh-cua": "0.2.1-rc.2",

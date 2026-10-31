@@ -4,13 +4,10 @@ import { release } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
-import * as provider from '@deepseek-ai/dsh-experimental-cua-macos'
-import { apply as applyPatched, type Hooks } from 'perse-cua/internal-provider'
+import { apply as applyPatched, Config, inject, type Hooks } from 'perse-cua/internal-provider'
 
 export const name = 'perse-cua-native'
-export const inject = provider.inject
-export const Config = provider.Config
-export type Config = provider.Config
+export { Config, inject }
 
 /** Check the helper before scheduling provider activation. */
 export function resolveHelper(config: Config): string {

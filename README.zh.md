@@ -4,18 +4,17 @@
 
 `perse` = persevere
 
-把 [cua-driver](https://github.com/trycua/cua) 的桌面自动化工具交给 DSH 的模型，
-但不再为一次会话根本用不到的部分付费。
+为 DSH 提供桌面自动化：macOS 默认使用原生 `cua` 工具，其他平台默认连接 [cua-driver](https://github.com/trycua/cua) MCP。
 
 **Part of Persevere with DSH**
 
 -----
 
-macOS 14 及以上默认使用实验性的 DSH 原生执行器。它会请求逐应用授权，并要求宿主提供 DSH 0.2.1-rc.2 服务；预览在操作后捕获已授权窗口，不会改变模型使用的截图坐标；原生 GUI、授权和光标的完整体验尚未验收。下文有关驱动的测量和行为适用于 `backend: mcp`。
+macOS 14 及以上默认使用实验性的 DSH 原生执行器，模型直接调用 `cua` 工具并遵循逐应用授权流程，优先通过它操作。原生工具提供后台 AX 操作和截图，但不提供类型化浏览器标签页；需要后者时可显式配置 MCP 执行器并遵循其授权，不得用切换执行器绕过拒绝或撤销的授权。它会请求逐应用授权，并要求宿主提供 DSH 0.2.1-rc.2 服务；预览在操作后捕获已授权窗口，不会改变模型使用的截图坐标；原生 GUI、授权和光标的完整体验尚未验收。下文有关驱动的测量和行为适用于 `backend: mcp`。
 
 已有 macOS 配置若设置了 `command`、`args`、`allow`、`indicator` 等 MCP 专属选项，须增加 `backend: mcp`；否则启动会报错，不会静默切回外部驱动。已加载原生执行器的配置档案可设置 `presenterOnly: true` 以提供预览服务；自动原生预览要求本插件管理执行器及其授权生命周期。
 
-## 它解决什么
+## MCP 执行器解决什么
 
 cua-driver 0.28.1 对外声明 **56 个工具**。不管这一轮任务碰不碰图形界面，这 56 个定义都会
 挂在**每一次**模型请求上。在发布版驱动上实测：
@@ -29,10 +28,9 @@ cua-driver 0.28.1 对外声明 **56 个工具**。不管这一轮任务碰不碰
 菜单子树占 146 个元素中的 145 个、占渲染字节的 **88%**。它永远不可能是操作目标 —— 菜单项要用
 `invoke_menu` 按路径走 —— 所以它纯粹是干扰定位的噪音。
 
-## 它做什么
+## MCP 执行器做什么
 
-1. **把描述压缩到首句** —— 默认省下来的部分主要来自这里。完整操作手册并没有丢：它本来就以
-   `cua-driver` 技能的形式随包发布，模型需要时按需加载。参数 schema 原样透传，所以每个工具
+1. **把描述压缩到首句** —— 默认省下来的部分主要来自这里。参数 schema 原样透传，所以每个工具
    仍然正常校验。
 2. **只拒绝能证明是废料的工具。** `bestExperience` 开启（默认）时，默认 `deny` 只剩 3 个
    不可能改变任务结果的工具：`check_for_update` 探测，以及两个已废弃的兼容 shim
@@ -65,12 +63,13 @@ cua-driver 0.28.1 对外声明 **56 个工具**。不管这一轮任务碰不碰
 ```yaml
 - id: perse-cua
   config:
+    backend: mcp
     allow: !!js (await import('perse-cua')).MINIMAL_ALLOW
 ```
 
 ## 使用
 
-`perse-cua` 自带 `dsh.bundle.patch`，所以装上它就已经注册了 loader 行。你只需要加一条
+`perse-cua` 自带 `dsh.bundle.patch`，安装后已注册 loader 行。macOS 默认无需覆盖执行器；选择外部 MCP 驱动时，加一条
 **config 覆盖** —— 不要写第二条 `insert`，那会撞 loader id 唯一性规则（R-07）：
 
 ```yaml

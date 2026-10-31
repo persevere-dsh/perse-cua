@@ -10,7 +10,7 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import ComputerUse from '@deepseek-ai/dsh-computer-use'
 import Tools from '@deepseek-ai/dsh-tools'
 import Agents from '@deepseek-ai/dsh-agent'
-import Prompt from '@deepseek-ai/dsh-system-prompt'
+import Prompt, { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import Subprocess from '@deepseek-ai/dsh-subprocess'
 import LocalSubprocess from '@deepseek-ai/dsh-subprocess-local'
 import Settings from '@deepseek-ai/dsh-settings'
@@ -90,6 +90,14 @@ test('macOS default and explicit MCP use one loader entry and stop on disable', 
     await ctx.loader.await()
     await waitFor(() => ctx.computerUse?.providerName === 'dsh-cua' && ctx.tools.get('cua'))
     assert.equal(ctx.tools.get('mcp__cua__get_window_state'), undefined)
+    const removeSkillCatalog = ctx.systemPrompt.section({ name: 'fixture:skill-catalog', order: 0, text: 'Available skill: cua-driver (CLI or MCP). Load the skill for GUI tasks.' })
+    const guidance = renderPrompt(await ctx.systemPrompt.assemble())
+    assert.match(guidance, /prefer the registered cua tool and its application authorization flow/ )
+    assert.match(guidance, /Available skill: cua-driver/ )
+    assert.match(guidance, /Do not load the external cua-driver skill for native cua/ )
+    assert.match(guidance, /do not apply its CLI or MCP parameters to cua; follow the cua tool schema and native guidance/ )
+    assert.match(guidance, /typed browser tabs is unavailable/ )
+    assert.match(guidance, /Do not switch providers to bypass denied or revoked access/ )
     const entry = ctx.loader.resolve('perse-cua'), fiber = entry.fiber
     const grants = fiber.config.allowedApps
     await ctx.loader.update('perse-cua', { config: { allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture' }] } })
@@ -100,7 +108,14 @@ test('macOS default and explicit MCP use one loader entry and stop on disable', 
     await ctx.loader.update('perse-cua', { config: { backend: 'mcp', command: process.execPath, args: [fixture, log, expired], indicator: false, bestExperience: false } })
     await ctx.loader.await()
     await waitFor(() => ctx.tools.get('mcp__cua__get_window_state'))
+    assert.ok(ctx.tools.get('mcp__cua__browser_navigate'))
+    await ctx.tools.get('mcp__cua__browser_navigate').execute({ url: 'https://example.test' })
+    assert.match(await readFile(log, 'utf8'), /browser_navigate/ )
     assert.equal(ctx.tools.get('cua'), undefined)
+    const mcpGuidance = renderPrompt(await ctx.systemPrompt.assemble())
+    assert.match(mcpGuidance, /Available skill: cua-driver/ )
+    assert.doesNotMatch(mcpGuidance, /Do not load the external cua-driver skill for native cua/ )
+    removeSkillCatalog()
     assert.equal(ctx.get('computerUse'), undefined)
     await ctx.loader.update('perse-cua', { disabled: true })
     await ctx.loader.await()

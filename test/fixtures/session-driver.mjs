@@ -6,7 +6,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   if (request.id === undefined) continue
   let result
   if (request.method === 'initialize') result = { protocolVersion: '2025-06-18', capabilities: {}, serverInfo: { name: 'session-fixture', version: '1' } }
-  else if (request.method === 'tools/list') result = { tools: ['get_window_state', 'end_session'].map(name => ({ name, inputSchema: { type: 'object', properties: { session: { type: 'string' } } } })) }
+  else if (request.method === 'tools/list') result = { tools: ['get_window_state', 'end_session', 'browser_navigate'].map(name => ({ name, inputSchema: { type: 'object', properties: { session: { type: 'string' } } } })) }
   else {
     const { name, arguments: args } = request.params
     appendFileSync(log, JSON.stringify({ pid: process.pid, name, args }) + '\n')
