@@ -105,3 +105,52 @@ private final class CancelAfterFirstStep: @unchecked Sendable {
     signalStarted.finish()
     #expect(fadeCount == 1)
 }
+
+@Test @MainActor func newCursorCannotBeFadedByAnOlderInProgressFade() async {
+    let (started, signalStarted) = AsyncStream<Void>.makeStream()
+    let (release, signalRelease) = AsyncStream<Void>.makeStream()
+    let visibility = CursorVisibility(), revision = visibility.advance()
+    var opacity = 1.0
+    var writes = 0
+    let task = Task { @MainActor in
+        await animateCursorFade(steps: 2, pause: {
+            signalStarted.yield()
+            for await _ in release { return }
+        }, isCurrent: { visibility.isCurrent(revision) }, setAlpha: { opacity = $0; writes += 1 })
+    }
+    var iterator = started.makeAsyncIterator()
+    _ = await iterator.next()
+    signalRelease.yield()
+    _ = await iterator.next()
+    #expect(opacity == 0.5)
+    visibility.advance()
+    opacity = 1
+    signalRelease.yield()
+    await task.value
+    signalStarted.finish(); signalRelease.finish()
+    #expect(opacity == 1)
+    #expect(writes == 1)
+}
+
+@Test @MainActor func cancelledInProgressFadeCannotChangeOpacityAgain() async {
+    let (started, signalStarted) = AsyncStream<Void>.makeStream()
+    let (release, signalRelease) = AsyncStream<Void>.makeStream()
+    var opacity = 1.0
+    let task = Task { @MainActor in
+        await animateCursorFade(steps: 2, pause: {
+            signalStarted.yield()
+            for await _ in release { return }
+        }, isCurrent: { true }, setAlpha: { opacity = $0 })
+    }
+    var iterator = started.makeAsyncIterator()
+    _ = await iterator.next()
+    signalRelease.yield()
+    _ = await iterator.next()
+    #expect(opacity == 0.5)
+    task.cancel()
+    opacity = 1
+    signalRelease.yield()
+    await task.value
+    signalStarted.finish(); signalRelease.finish()
+    #expect(opacity == 1)
+}

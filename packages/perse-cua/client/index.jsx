@@ -12,11 +12,18 @@ const backdrop = image => ({ position: 'absolute', inset: 0, backgroundImage: `u
 const validImage = value => typeof value === 'string' && /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value)
 
 function PreviewImage({ item, selected, t, toggle }) {
-  const [frame, setFrame] = useState(item)
+  const [storedFrame, setFrame] = useState(item)
+  const frame = validImage(item.image) ? storedFrame : item
   const timer = useRef(null)
   const latest = useRef(item)
   useEffect(() => {
     latest.current = item
+    if (!validImage(item.image)) {
+      if (timer.current) clearTimeout(timer.current)
+      timer.current = null
+      setFrame(item)
+      return
+    }
     if (item.working && item.action !== 'get_window_state') {
       if (timer.current) clearTimeout(timer.current)
       timer.current = null

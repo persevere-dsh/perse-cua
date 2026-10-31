@@ -53,15 +53,10 @@ import CoreGraphics
         window.orderFrontRegardless()
         fadeTask = scheduleCursorFade(delay: { try await Task.sleep(for: .seconds(1.5)) }) { [weak self, weak window] in
             guard let self, let window, self.visibility.isCurrent(shownRevision) else { return }
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.5
-                window.animator().alphaValue = 0
-            } completionHandler: { [weak self, weak window] in
-                Task { @MainActor in
-                    guard let self, self.visibility.isCurrent(shownRevision) else { return }
-                    window?.orderOut(nil)
-                }
-            }
+            await animateCursorFade(steps: 20, pause: { try await Task.sleep(for: .milliseconds(25)) },
+                isCurrent: { self.visibility.isCurrent(shownRevision) }, setAlpha: { window.alphaValue = $0 })
+            guard !Task.isCancelled, self.visibility.isCurrent(shownRevision) else { return }
+            window.orderOut(nil)
         }
     }
 
@@ -120,11 +115,24 @@ import CoreGraphics
 /// Schedule a fade without retaining a closed cursor or blocking the main actor.
 @MainActor func scheduleCursorFade(
     delay: @escaping @Sendable () async throws -> Void,
-    onReady: @escaping @MainActor () -> Void
+    onReady: @escaping @MainActor () async -> Void
 ) -> Task<Void, Never> {
     Task { @MainActor in
         do { try await delay(); try Task.checkCancellation() } catch { return }
-        onReady()
+        await onReady()
+    }
+}
+
+/// Stop updating opacity as soon as a newer cursor state or cancellation wins.
+@MainActor func animateCursorFade(
+    steps: Int, pause: @escaping @Sendable () async throws -> Void,
+    isCurrent: @escaping @MainActor () -> Bool, setAlpha: @escaping @MainActor (Double) -> Void
+) async {
+    guard steps > 0 else { return }
+    for step in 1...steps {
+        do { try await pause(); try Task.checkCancellation() } catch { return }
+        guard isCurrent() else { return }
+        setAlpha(1 - Double(step) / Double(steps))
     }
 }
 

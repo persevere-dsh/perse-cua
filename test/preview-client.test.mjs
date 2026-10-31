@@ -89,3 +89,30 @@ test('real preview component switches, expands, closes and reports a failed clos
     if (previousWindow === undefined) delete globalThis.window; else globalThis.window = previousWindow
   }
 })
+
+test('preview immediately clears removed frames during action animation and retains normal transitions', async () => {
+  globalThis.__previewReact = React
+  const source = (await readFile(new URL('../packages/perse-cua/client/index.jsx', import.meta.url), 'utf8'))
+    .replace("import React, { useEffect, useRef, useState } from 'react'", 'const React = globalThis.__previewReact; const { useEffect, useRef, useState } = React')
+    .replace("import remote from '../lib/typert.remote-client.js'", 'const remote = {}') + '\nexport { PreviewImage }\n'
+  const { PreviewImage } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`)
+  const original = { id: 'a/app/1', title: 'One', action: 'click', image: 'data:image/png;base64,AAAA', point: { x: .2, y: .3 } }
+  const element = item => React.createElement(PreviewImage, { key: item.id, item, selected: false, t: key => key, toggle() {} })
+  let root
+  try {
+    await act(async () => { root = TestRenderer.create(element(original)) })
+    assert.equal(root.root.findByType('img').props.src, original.image)
+    await act(async () => { root.update(element({ ...original, point: undefined, image: 'data:image/png;base64,BBBB' })) })
+    assert.equal(root.root.findByType('img').props.src, original.image, 'normal frame transition should retain the animation frame')
+    await act(async () => { root.update(element({ id: original.id, title: 'One', action: 'click', previewUnavailable: true })) })
+    assert.equal(root.root.findAllByType('img').length, 0, 'permission failure must clear the frame immediately')
+    assert.deepEqual(root.root.findAll(node => node.props.style?.placeItems === 'center')[0].children, ['unavailable'])
+    await act(async () => { root.update(element(original)) })
+    assert.equal(root.root.findAllByType('img').length, 1)
+    await act(async () => { root.update(null) })
+    assert.equal(root.toJSON(), null, 'closing the window must remove the animated frame immediately')
+    const other = { id: 'a/app/2', title: 'Two', action: 'getState', image: 'data:image/png;base64,CCCC' }
+    await act(async () => { root.update(element(other)) })
+    assert.equal(root.root.findByType('img').props.src, other.image)
+  } finally { if (root) await act(async () => root.unmount()); delete globalThis.__previewReact }
+})
