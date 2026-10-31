@@ -10,9 +10,10 @@ import { createInterface } from 'node:readline'
 /**
  * Start a test-owned service launcher for one private helper copy.
  * @param {string} helperPath - Executable copied into the test workspace.
+ * @param {{prestart?: boolean}} [options] - Start the isolated service before returning.
  * @returns {Promise<() => Promise<void>>} Cleanup that awaits every owned service exit.
  */
-export async function startFixtureHost(helperPath) {
+export async function startFixtureHost(helperPath, options = {}) {
   helperPath = await realpath(helperPath)
   const source = await readFile(helperPath, 'utf8')
   const marker = `\n// Fixture host: ${JSON.stringify(helperPath)}\n`
@@ -68,14 +69,22 @@ export async function startFixtureHost(helperPath) {
       resolve()
     })
   })
-  return async () => {
+  const close = async (stopChildren = false) => {
     closing = true
     for (const socket of sockets) socket.destroy()
     await new Promise((resolve) => { server.close(resolve) })
+    if (stopChildren) for (const { child } of children) child.kill('SIGKILL')
     const timer = setTimeout(() => {
       for (const { child } of children) child.kill('SIGKILL')
     }, 5000)
     try { await Promise.all([...children].map(service => service.done)) }
     finally { clearTimeout(timer); await writeFile(helperPath, source) }
   }
+  try {
+    if (options.prestart) await ensureService(10000)
+  } catch (error) {
+    await close(true)
+    throw error
+  }
+  return () => close()
 }

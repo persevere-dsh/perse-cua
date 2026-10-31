@@ -29,3 +29,16 @@ test('native helper builder rejects other platforms before invoking a compiler',
   if (process.platform === 'darwin') return
   await assert.rejects(buildHelper({ arch: 'arm64', output: '/tmp/out', signIdentity: '-', requireDeveloperId: false }), /requires macOS/)
 })
+
+test('fixture prestart failure releases its server and child so it can fail again and exit', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'perse-fixture-prestart-fail-'))
+  const helper = join(directory, 'fail.mjs'), source = 'process.exit(17)\n'
+  try {
+    await writeFile(helper, source, { mode: 0o700 })
+    const script = `import assert from 'node:assert/strict'; import { startFixtureHost } from ${JSON.stringify(new URL('./fixtures/native-fixture-host.mjs', import.meta.url).href)}; for (let i = 0; i < 2; i++) await assert.rejects(startFixtureHost(process.argv[1], { prestart: true }), /Fixture service exited before readiness: 17/);`
+    const { execFile } = await import('node:child_process')
+    const { promisify } = await import('node:util')
+    await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script, helper], { timeout: 3000 })
+    assert.equal(await readFile(helper, 'utf8'), source)
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})

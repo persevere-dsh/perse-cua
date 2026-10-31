@@ -31,7 +31,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
   const pointTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const clearPoint = (id: string): void => { const timer = pointTimers.get(id); if (timer) clearTimeout(timer); pointTimers.delete(id) }
   let closed = false
-  const owners = new Map<Agent, Map<string, { name: string; selected?: number; windows: Map<number, PreviewWindow>; snapshots: Map<string, number>; modelImages: Map<number, { image: string; width: number; height: number }>; observations: Map<number, { width: number; height: number }>; captures: Map<number, { image: string; width: number; height: number }> }>>()
+  const owners = new Map<Agent, Map<string, { name: string; selected?: number; windows: Map<number, PreviewWindow>; snapshots: Map<string, number>; modelImages: Map<number, { image: string; width: number; height: number }>; observations: Map<number, { width: number; height: number }>; windowSizes: Map<number, { width: number; height: number }>; captures: Map<number, { image: string; width: number; height: number }> }>>()
   const idFor = (agent: Agent, handle: string, id: number): string => `${encodeURIComponent(agent.id)}/${encodeURIComponent(handle)}/${id}`
   const disposed = new WeakSet<Agent>()
   const invalidateFrames = (agent: Agent, handle: string, scope: 'application' | 'connection', reason: 'discoveryUnavailable' | 'previewUnavailable'): void => {
@@ -115,7 +115,14 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
           for (const row of visible) {
             const id = idFor(agent, handle, row.windowId)
             if (dismissed.has(id)) continue
-            const old = app.windows.get(row.windowId)
+            let old = app.windows.get(row.windowId)
+            const size = app.windowSizes.get(row.windowId)
+            app.windowSizes.set(row.windowId, { width: row.bounds.width, height: row.bounds.height })
+            if (old && size && (size.width !== row.bounds.width || size.height !== row.bounds.height)) {
+              captures.get(id)?.abort(); captures.delete(id); clearPoint(id); app.captures.delete(row.windowId); app.modelImages.delete(row.windowId); app.observations.delete(row.windowId)
+              const { point: _point, ...rest } = old
+              old = { ...rest, previewUnavailable: true }; app.windows.set(row.windowId, old); view.put(old)
+            }
             missing.delete(id)
             if (!old) {
               const count = (appearances.get(id) ?? 0) + 1
@@ -136,6 +143,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
           const prefix = `${encodeURIComponent(agent.id)}/${encodeURIComponent(handle)}/`
           for (const id of appearances.keys()) if (id.startsWith(prefix) && !visible.some(row => idFor(agent, handle, row.windowId) === id)) appearances.delete(id)
           for (const [windowId, old] of app.windows) if (!seen.has(windowId)) {
+            captures.get(old.id)?.abort(); captures.delete(old.id)
             if (automatic.has(old.id)) {
               const count = (missing.get(old.id) ?? 0) + 1
               missing.set(old.id, count)
@@ -162,7 +170,10 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
       const { point: _point, ...rest } = old
       const image = `data:${shot.mimeType};base64,${shot.data}`
       const item = { ...rest, image, capturedAt: Date.now(), previewUnavailable: false, windowUnavailable: false }
-      if (shot.bounds) app.captures.set(target.window, { image, width: shot.bounds.width, height: shot.bounds.height })
+      if (shot.bounds) {
+        app.captures.set(target.window, { image, width: shot.bounds.width, height: shot.bounds.height })
+        app.windowSizes.set(target.window, { width: shot.bounds.width, height: shot.bounds.height })
+      }
       app.windows.set(target.window, item); view.put(item)
     } catch (error) {
       if (!controller.signal.aborted && !closed) {
@@ -209,14 +220,20 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
       const previous = apps.get(value.appHandle)
       if (previous) {
         if (typeof value.name === 'string') previous.name = value.name
-      } else apps.set(value.appHandle, { name: typeof value.name === 'string' ? value.name : 'Application', windows: new Map(), snapshots: new Map(), modelImages: new Map(), observations: new Map(), captures: new Map() })
+      } else apps.set(value.appHandle, { name: typeof value.name === 'string' ? value.name : 'Application', windows: new Map(), snapshots: new Map(), modelImages: new Map(), observations: new Map(), windowSizes: new Map(), captures: new Map() })
       schedule()
       return
     }
     if (typeof params.appHandle !== 'string') return
     const handle = params.appHandle, app = apps.get(handle)
     if (!app) return
-    schedule(true, agent.id)
+    if (method !== 'listWindows' || result.isError) schedule(true, agent.id)
+    if (method === 'listWindows' && result.isError) {
+      const message = record(result.error)?.message
+      const code = typeof message === 'string' ? /^([A-Z][A-Z0-9_]*):/.exec(message)?.[1] : undefined
+      const kind = failureKind(code)
+      if (kind === 'connection' || kind === 'application') invalidateFrames(agent, handle, kind, 'discoveryUnavailable')
+    }
     const rows = method === 'listWindows' && !result.isError && Array.isArray(result.value) ? result.value : method === 'getState' && Array.isArray(value?.windows) ? value.windows : undefined
     if (rows) {
       const seen = new Set<number>()
@@ -225,15 +242,24 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
         if (typeof window?.windowId !== 'number') continue
         const windowId = window.windowId; seen.add(windowId)
         const bounds = record(window.bounds)
-        if (method === 'getState' && typeof bounds?.width === 'number' && typeof bounds.height === 'number') app.observations.set(windowId, { width: bounds.width, height: bounds.height })
+        const size = app.windowSizes.get(windowId)
+        const nextSize = typeof bounds?.width === 'number' && typeof bounds.height === 'number' ? { width: bounds.width, height: bounds.height } : undefined
+        const resized = nextSize !== undefined && size !== undefined && (size.width !== nextSize.width || size.height !== nextSize.height)
+        if (nextSize) app.windowSizes.set(windowId, nextSize)
+        if (method === 'getState' && nextSize) app.observations.set(windowId, nextSize)
         const old = app.windows.get(windowId)
         if (!old) continue
         const title = [app.name, typeof window.title === 'string' ? window.title : ''].filter(Boolean).join(' · ')
-        const { windowUnavailable: _unavailable, ...rest } = old
-        const item = { ...rest, title, ...(window.isOnScreen === false || window.onCurrentSpace === false ? { windowUnavailable: true } : {}) }
-        app.windows.set(windowId, item); view.put(item)
+        const unavailable = window.isOnScreen === false || window.onCurrentSpace === false
+        if (resized || unavailable) { captures.get(old.id)?.abort(); captures.delete(old.id) }
+        if (resized) { clearPoint(old.id); app.captures.delete(windowId); app.modelImages.delete(windowId); if (method !== 'getState') app.observations.delete(windowId) }
+        if (old.title !== title || !!old.windowUnavailable !== unavailable || resized) {
+          const { windowUnavailable: _unavailable, point, ...rest } = old
+          const item = { ...rest, title, ...(!resized && point ? { point } : {}), ...(unavailable ? { windowUnavailable: true } : {}), ...(resized ? { previewUnavailable: true } : {}) }
+          app.windows.set(windowId, item); view.put(item)
+        }
       }
-      for (const [windowId, old] of app.windows) if (!seen.has(windowId)) { const item = { ...old, windowUnavailable: true }; app.windows.set(windowId, item); view.put(item) }
+      for (const [windowId, old] of app.windows) if (!seen.has(windowId) && !old.windowUnavailable) { captures.get(old.id)?.abort(); captures.delete(old.id); const item = { ...old, windowUnavailable: true }; app.windows.set(windowId, item); view.put(item) }
     }
     if (method === 'listWindows') return
     const selected = typeof value?.windowId === 'number' ? value.windowId : typeof params.windowId === 'number' ? params.windowId : typeof params.snapshotId === 'string' && app.snapshots.has(params.snapshotId) ? app.snapshots.get(params.snapshotId) : typeof value?.focusedWindowId === 'number' ? value.focusedWindowId : app.selected
@@ -256,6 +282,8 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
     if (result.isError) { delete item.image; delete item.capturedAt }
     if (method === 'screenshot' && typeof value?.data === 'string' && typeof value.mimeType === 'string') {
       item.image = `data:${value.mimeType};base64,${value.data}`; item.capturedAt = Date.now(); item.previewUnavailable = false; item.windowUnavailable = false
+      const bounds = record(value.bounds)
+      if (typeof bounds?.width === 'number' && bounds.width > 0 && typeof bounds.height === 'number' && bounds.height > 0) app.windowSizes.set(selected, { width: bounds.width, height: bounds.height })
       if (typeof value.pixelWidth === 'number' && typeof value.pixelHeight === 'number' && value.pixelWidth > 0 && value.pixelHeight > 0) app.modelImages.set(selected, { image: item.image, width: value.pixelWidth, height: value.pixelHeight })
     }
     const model = app.modelImages.get(selected)
@@ -297,7 +325,10 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
       clearPoint(id)
       const { point: _point, ...rest } = latest
       const next = { ...rest, image: `data:${shot.mimeType};base64,${shot.data}`, capturedAt: Date.now(), previewUnavailable: false, windowUnavailable: false }
-      if (shot.bounds) app.captures.set(selected, { image: next.image, width: shot.bounds.width, height: shot.bounds.height })
+      if (shot.bounds) {
+        app.captures.set(selected, { image: next.image, width: shot.bounds.width, height: shot.bounds.height })
+        app.windowSizes.set(selected, { width: shot.bounds.width, height: shot.bounds.height })
+      }
       app.windows.set(selected, next); view.put(next)
     }).catch(error => {
       if (closed || controller.signal.aborted || captures.get(id) !== controller || disposed.has(agent)) return

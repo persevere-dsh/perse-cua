@@ -828,3 +828,98 @@ test('old discovery replies cannot alter a resubscribed or reauthorized applicat
     } finally { preview.close() }
   }
 })
+
+test('list observations preserve active captures only while window state is unchanged', async () => {
+  for (const change of ['same', 'resize', 'hidden', 'closed', 'failure']) {
+    const listeners = new Map(), windows = new Map(); let pending
+    const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+    const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+    const preview = observeNative(ctx, view, { intervalMs: 10 }), agent = { id: 'a' }
+    try {
+      const row = { windowId: 1, title: 'One', bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }
+      const emit = (method, params, value, isError = false) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, isError ? { isError: true, error: { message: 'PERMISSION_DENIED: fixture denial' } } : { isError: false, value })
+      emit('getApp', {}, { appHandle: 'app', name: 'A' })
+      emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'b2xk', mimeType: 'image/png' })
+      preview.hooks.onClient(agent, (_handle, _windowId, signal) => new Promise(resolve => { pending = { signal, resolve } }), async () => [row])
+      view.watch('a', true)
+      for (let i = 0; i < 100 && !pending; i++) await new Promise(resolve => setTimeout(resolve, 5))
+      assert.ok(pending, change)
+      const observed = change === 'closed' ? [] : [{ ...row, bounds: change === 'resize' ? { width: 200, height: 100 } : row.bounds, isOnScreen: change !== 'hidden' }]
+      emit('listWindows', { appHandle: 'app' }, observed, change === 'failure')
+      assert.equal(pending.signal.aborted, change === 'failure', change)
+      pending.resolve({ windowId: 1, data: 'bmV3', mimeType: 'image/png' })
+      await new Promise(resolve => setImmediate(resolve))
+      assert.equal(windows.get('a/app/1')?.image, change === 'same' ? 'data:image/png;base64,bmV3' : change === 'failure' ? undefined : 'data:image/png;base64,b2xk', change)
+      if (change === 'resize') assert.equal(windows.get('a/app/1')?.previewUnavailable, true)
+      if (change === 'hidden' || change === 'closed') assert.equal(windows.get('a/app/1')?.windowUnavailable, true)
+    } finally { preview.close() }
+  }
+})
+
+test('screenshot dimensions establish the first list baseline and invalidate old click coordinates on resize', () => {
+  const listeners = new Map(), windows = new Map()
+  const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+  const view = { setDismissHandler() {}, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+  const preview = observeNative(ctx, view), agent = { id: 'a' }
+  try {
+    const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+    emit('getApp', {}, { appHandle: 'app', name: 'A' })
+    emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'b2xk', mimeType: 'image/png', pixelWidth: 100, pixelHeight: 100, bounds: { width: 100, height: 100 } })
+    emit('click', { appHandle: 'app', windowId: 1, x: 25, y: 25 }, { dispatched: true })
+    assert.ok(windows.get('a/app/1').point)
+    emit('listWindows', { appHandle: 'app' }, [{ windowId: 1, title: 'One', bounds: { width: 200, height: 100 }, isOnScreen: true }])
+    assert.equal(windows.get('a/app/1').previewUnavailable, true)
+    assert.equal(windows.get('a/app/1').point, undefined)
+    emit('click', { appHandle: 'app', windowId: 1, x: 25, y: 25 }, { dispatched: true })
+    assert.equal(windows.get('a/app/1').point, undefined)
+  } finally { preview.close() }
+})
+
+test('a cancelled old frame cannot replace the size from a newer screenshot', async () => {
+  const listeners = new Map(), windows = new Map(); let pending
+  const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+  const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+  const preview = observeNative(ctx, view, { intervalMs: 10 }), agent = { id: 'a' }
+  try {
+    const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+    const row = { windowId: 1, title: 'One', bounds: { width: 100, height: 100 }, isOnScreen: true }
+    emit('getApp', {}, { appHandle: 'app', name: 'A' })
+    emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'b2xk', mimeType: 'image/png', bounds: row.bounds })
+    preview.hooks.onClient(agent, (_h, _id, signal) => new Promise(resolve => { pending = { signal, resolve } }), async () => [row])
+    view.watch('a', true)
+    for (let i = 0; i < 100 && !pending; i++) await new Promise(resolve => setTimeout(resolve, 5))
+    assert.ok(pending)
+    emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'bmV3', mimeType: 'image/png', bounds: { width: 200, height: 100 } })
+    assert.equal(pending.signal.aborted, true)
+    pending.resolve({ windowId: 1, data: 'b2xk', mimeType: 'image/png', bounds: { width: 100, height: 100 } })
+    await new Promise(resolve => setImmediate(resolve))
+    emit('listWindows', { appHandle: 'app' }, [{ ...row, bounds: { width: 200, height: 100 } }])
+    assert.equal(windows.get('a/app/1').image, 'data:image/png;base64,bmV3')
+    assert.equal(windows.get('a/app/1').previewUnavailable, false)
+  } finally { preview.close() }
+})
+
+test('window changes cancel action-triggered captures and ignore late frames', async () => {
+  for (const change of ['resize', 'hidden', 'closed']) {
+    const listeners = new Map(), windows = new Map(); let pending
+    const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+    const view = { setDismissHandler() {}, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+    const preview = observeNative(ctx, view), agent = { id: 'a' }
+    try {
+      const row = { windowId: 1, title: 'One', bounds: { width: 100, height: 100 }, isOnScreen: true }
+      const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+      emit('getApp', {}, { appHandle: 'app', name: 'A' })
+      emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'b2xk', mimeType: 'image/png', bounds: row.bounds })
+      preview.hooks.onClient(agent, (_handle, _id, signal) => new Promise(resolve => { pending = { signal, resolve } }))
+      emit('click', { appHandle: 'app', windowId: 1 }, { dispatched: true })
+      assert.ok(pending, change)
+      const rows = change === 'closed' ? [] : [{ ...row, bounds: change === 'resize' ? { width: 200, height: 100 } : row.bounds, isOnScreen: change !== 'hidden' }]
+      emit('listWindows', { appHandle: 'app' }, rows)
+      assert.equal(pending.signal.aborted, true, change)
+      pending.resolve({ windowId: 1, data: 'bmV3', mimeType: 'image/png', bounds: row.bounds })
+      await new Promise(resolve => setImmediate(resolve))
+      assert.equal(windows.get('a/app/1').image, 'data:image/png;base64,b2xk', change)
+      if (change === 'resize') assert.equal(windows.get('a/app/1').previewUnavailable, true)
+    } finally { preview.close() }
+  }
+})

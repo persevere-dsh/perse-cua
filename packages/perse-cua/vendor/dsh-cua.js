@@ -852,18 +852,19 @@ var CuaCoordinates = class {
 		});
 	}
 	/**
-	* Convert admitted coordinate arguments once, before native dispatch.
+	* Convert coordinates against current geometry and check the admitted screenshot mapping.
 	* @param request - model request already checked by the operation schema.
+	* @param admittedFrame - screenshot mapping retained when an absolute request entered the queue.
 	* @returns native parameters with Host-only coordinate options removed.
 	*/
-	parameters(request) {
+	parameters(request, admittedFrame) {
 		const params = request.params;
 		const native = z.record(z.string(), z.json()).parse(params);
 		if (!("x" in params) && !("fromX" in params)) return native;
 		const frame = this.applications.get(params.appHandle)?.get(params.windowId);
 		if (!frame || frame.width <= 0 || frame.height <= 0) throw new NativeError("STALE_SNAPSHOT", "Read fresh window state before coordinate input");
 		const relative = params.relative === true;
-		if (!relative && !frame.image) throw new NativeError("SCREENSHOT_REQUIRED", "Take a fresh screenshot before using absolute pixel coordinates");
+		if (!relative && (!frame.image || admittedFrame !== void 0 && frame !== admittedFrame)) throw new NativeError("SCREENSHOT_REQUIRED", "Take a fresh screenshot before using absolute pixel coordinates");
 		const convert = (value, axis) => {
 			const pixels = frame.image?.[axis] ?? frame[axis];
 			if (relative) return Math.min(value / 1e3 * frame[axis], Math.max(0, frame[axis] - 1));
@@ -881,6 +882,11 @@ var CuaCoordinates = class {
 			native.toY = convert(params.toY, "height");
 		}
 		return native;
+	}
+	admittedFrame(request) {
+		const params = request.params;
+		if (!(("x" in params || "fromX" in params) && params.relative !== true)) return void 0;
+		return this.applications.get(params.appHandle)?.get(params.windowId);
 	}
 };
 //#endregion
@@ -1000,7 +1006,7 @@ function installCua(ctx, config, backend) {
 		return arbiter.run(kind, signal, (queuedSignal) => {
 			const remaining = budget - (performance.now() - start);
 			if (remaining <= 0) throw new NativeError(kind === "preview" ? "NATIVE_BUSY" : "NATIVE_TIMEOUT", "Native request timed out before dispatch");
-			return client.request(method, params, queuedSignal, callId, remaining);
+			return client.request(method, typeof params === "function" ? params() : params, queuedSignal, callId, remaining);
 		}, { preempt, waitMs: budget });
 	};
 	const ownerCleanups = /* @__PURE__ */ new Map();
@@ -1057,30 +1063,34 @@ function installCua(ctx, config, backend) {
 		};
 		const callNative = async (request, execution) => {
 			const { method, params: parsedParams } = request;
-			const params = execution.coordinates.parameters(request);
+			execution.coordinates.parameters(request);
+			const admittedFrame = execution.coordinates.admittedFrame(request);
 			const agent = execution.agent;
 			const signal = execution.signal;
 			signal.throwIfAborted();
 			const client = execution.nativeClient;
-			const nativeParams = method === "findApps" ? {
-				...params,
-				maxAppMatches: config.maxAppMatches
-			} : method === "paste" ? {
-				...params,
-				maxClipboardBytes: config.maxClipboardBytes,
-				pasteReadTimeoutMs: config.pasteReadTimeoutMs,
-				maxElements: config.maxElements,
-				maxDepth: config.maxDepth
-			} : method === "getState" ? {
-				...params,
-				maxElements: config.maxElements,
-				maxDepth: config.maxDepth
-			} : method === "drag" ? {
-				...params,
-				durationMs: config.dragDurationMs,
-				steps: config.dragSteps
-			} : params;
-			const requestNative = () => dispatchNative(execution.arbiter, client, "foreground", method, nativeParams, signal, execution.callId, !["getCapabilities", "listApps", "findApps"].includes(method));
+			const nativeParams = () => {
+				const params = execution.coordinates.parameters(request, admittedFrame);
+				return method === "findApps" ? {
+					...params,
+					maxAppMatches: config.maxAppMatches
+				} : method === "paste" ? {
+					...params,
+					maxClipboardBytes: config.maxClipboardBytes,
+					pasteReadTimeoutMs: config.pasteReadTimeoutMs,
+					maxElements: config.maxElements,
+					maxDepth: config.maxDepth
+				} : method === "getState" ? {
+					...params,
+					maxElements: config.maxElements,
+					maxDepth: config.maxDepth
+				} : method === "drag" ? {
+					...params,
+					durationMs: config.dragDurationMs,
+					steps: config.dragSteps
+				} : params;
+			};
+			const requestNative = () => dispatchNative(execution.arbiter, client, "foreground", method, nativeParams, signal, execution.callId, !["getCapabilities", "listApps", "findApps", "listWindows"].includes(method));
 			if (method === "screenshot") {
 				const { attachments, target } = await screenshotStore(ctx, execution);
 				const screenshot = NativeScreenshotResult.parse(await requestNative());
