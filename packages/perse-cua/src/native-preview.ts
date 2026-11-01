@@ -16,6 +16,11 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
   const lists = new Map<Agent, ListWindows>()
   const watchers = new Map<string, number>()
   const watcherVersions = new Map<string, object>()
+  const paused = new Map<string, NonNullable<PreviewWindow['activity']>>()
+  const pendingTurns = new Set<string>()
+  const activeTurns = new Set<string>()
+  const permissionBlocked = new Set<string>()
+  const turnSignals = new Map<string, { signal: AbortSignal; stop: () => void }>()
   const dismissed = new Set<string>()
   const automatic = new Set<string>()
   const appearances = new Map<string, number>()
@@ -35,7 +40,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
   const owners = new Map<Agent, Map<string, { name: string; selected?: number; windows: Map<number, PreviewWindow>; snapshots: Map<string, number>; modelImages: Map<number, { image: string; width: number; height: number }>; observations: Map<number, { width: number; height: number }>; windowSizes: Map<number, { width: number; height: number }>; captures: Map<number, { image: string; width: number; height: number }> }>>()
   const idFor = (agent: Agent, handle: string, id: number): string => `${encodeURIComponent(agent.id)}/${encodeURIComponent(handle)}/${id}`
   const disposed = new WeakSet<Agent>()
-  const invalidateFrames = (agent: Agent, handle: string, scope: 'application' | 'connection', reason: 'discoveryUnavailable' | 'previewUnavailable'): void => {
+  const invalidateFrames = (agent: Agent, handle: string, scope: 'application' | 'connection', reason: 'discoveryUnavailable' | 'previewUnavailable', issue?: PreviewWindow['previewIssue']): void => {
     const apps = owners.get(agent)
     if (!apps) return
     for (const [appHandle, app] of apps) {
@@ -44,8 +49,8 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
       for (const [windowId, item] of app.windows) {
         captures.get(item.id)?.abort(); captures.delete(item.id); clearPoint(item.id)
         const { image: _image, capturedAt: _capturedAt, point: _point, ...rest } = item
-        if (!item[reason] || item.image || item.capturedAt || item.point) {
-          const failed = { ...rest, [reason]: true }; app.windows.set(windowId, failed); view.put(failed)
+        if (!item[reason] || item.image || item.capturedAt || item.point || (issue !== undefined && item.previewIssue !== issue)) {
+          const failed = { ...rest, [reason]: true, ...(issue ? { previewIssue: issue } : {}) }; app.windows.set(windowId, failed); view.put(failed)
         }
       }
     }
@@ -53,7 +58,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
   view.setDismissHandler(id => { captured.delete(id); dismissed.add(id); discoveryStatus.delete(id); automatic.delete(id); appearances.delete(id); missing.delete(id); captures.get(id)?.abort(); captures.delete(id); clearPoint(id); for (const apps of owners.values()) for (const app of apps.values()) for (const [window, item] of app.windows) if (item.id === id) { app.windows.delete(window); app.windowSizes.delete(window) } })
   const schedule = (abort = false, sessionId?: string): void => {
     if (abort && (sessionId === undefined || backgroundAgent?.id === sessionId)) background?.abort()
-    if (closed || !watchers.size) {
+    if (closed || !watchers.size || [...watchers.keys()].every(id => paused.has(id) || permissionBlocked.has(id))) {
       if (refreshTimer) clearTimeout(refreshTimer)
       refreshTimer = undefined
       return
@@ -68,14 +73,14 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
     try {
       const candidates: Array<{ agent: Agent; handle: string; window: number; id: string; valid: () => boolean }> = []
       for (const [agent, apps] of owners) {
-        if (!watchers.has(agent.id)) continue
+        if (!watchers.has(agent.id) || paused.has(agent.id) || permissionBlocked.has(agent.id)) continue
         const list = lists.get(agent)
         if (!list) continue
         for (const [handle, app] of apps) {
           const statusId = `${encodeURIComponent(agent.id)}/${encodeURIComponent(handle)}/status`
           if (unsupported.has(statusId)) continue
           const version = watcherVersions.get(agent.id), client = clients.get(agent)
-          const listValid = (): boolean => watchers.has(agent.id) && watcherVersions.get(agent.id) === version && owners.get(agent)?.get(handle) === app && lists.get(agent) === list && client !== undefined && clients.get(agent) === client
+          const listValid = (): boolean => watchers.has(agent.id) && !paused.has(agent.id) && !permissionBlocked.has(agent.id) && watcherVersions.get(agent.id) === version && owners.get(agent)?.get(handle) === app && lists.get(agent) === list && client !== undefined && clients.get(agent) === client
           if (!listValid()) continue
           let rows: Awaited<ReturnType<ListWindows>>
           backgroundAgent = agent
@@ -91,7 +96,9 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
               console.warn('[perse-cua] Native preview discovery failed:', typeof code === 'string' && /^[A-Z0-9_]{1,64}$/.test(code) ? code : 'UNKNOWN')
             }
             const kind = failureKind(code)
-            if (kind === 'connection' || kind === 'application') invalidateFrames(agent, handle, kind, 'discoveryUnavailable')
+            const issue: PreviewWindow['previewIssue'] = code === 'PERMISSION_DENIED' ? 'accessibility' : kind === 'connection' ? 'connection' : undefined
+            if (code === 'PERMISSION_DENIED') permissionBlocked.add(agent.id)
+            if (kind === 'connection' || kind === 'application') invalidateFrames(agent, handle, kind, 'discoveryUnavailable', issue)
             if (app.windows.size) {
               view.remove(statusId); discoveryStatus.delete(statusId)
               if (kind !== 'connection' && kind !== 'application') for (const [windowId, item] of app.windows) if (!item.discoveryUnavailable) {
@@ -99,7 +106,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
               }
             } else if (!dismissed.has(statusId) && !discoveryStatus.has(statusId)) {
               discoveryStatus.add(statusId)
-              view.put({ id: statusId, title: app.name, action: 'getApp', discoveryUnavailable: true })
+              view.put({ id: statusId, title: app.name, action: 'getApp', discoveryUnavailable: true, ...(issue ? { previewIssue: issue } : {}) })
             }
             continue
           }
@@ -108,7 +115,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
           view.remove(statusId); discoveryStatus.delete(statusId)
           dismissed.delete(statusId)
           for (const [windowId, item] of app.windows) if (item.discoveryUnavailable) {
-            const { discoveryUnavailable: _discoveryUnavailable, ...recovered } = item
+            const { discoveryUnavailable: _discoveryUnavailable, previewIssue: _previewIssue, ...recovered } = item
             app.windows.set(windowId, recovered); view.put(recovered)
           }
           const visible = rows.filter(row => row.isOnScreen && row.onCurrentSpace !== false && row.bounds.width > 0 && row.bounds.height > 0)
@@ -173,7 +180,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
       const old = app.windows.get(target.window)
       if (!old || !target.valid() || shot.windowId !== target.window) return
       clearPoint(old.id)
-      const { point: _point, ...rest } = old
+      const { point: _point, previewIssue: _previewIssue, ...rest } = old
       const image = `data:${shot.mimeType};base64,${shot.data}`
       const item = { ...rest, image, capturedAt: Date.now(), previewUnavailable: false, windowUnavailable: false }
       if (shot.bounds) {
@@ -190,12 +197,14 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
           const old = current && app?.windows.get(current.window)
           if (old && app && current?.valid()) {
             const kind = failureKind(code)
-            if (kind === 'connection' || kind === 'application') invalidateFrames(current.agent, current.handle, kind, 'previewUnavailable')
+            const issue: PreviewWindow['previewIssue'] = code === 'PERMISSION_DENIED' ? 'screenRecording' : code === 'WINDOW_UNAVAILABLE' ? 'window' : code === 'CAPTURE_BUSY' || kind === 'timeout' ? 'busy' : kind === 'connection' ? 'connection' : undefined
+            if (code === 'PERMISSION_DENIED') permissionBlocked.add(current.agent.id)
+            if (kind === 'connection' || kind === 'application') invalidateFrames(current.agent, current.handle, kind, 'previewUnavailable', issue)
             else {
               const { point: _point, ...withoutPoint } = old
               const { image: _image, capturedAt: _capturedAt, ...withoutImage } = withoutPoint
               clearPoint(old.id); app.captures.delete(current.window)
-              const item = { ...(kind === 'timeout' ? withoutPoint : withoutImage), previewUnavailable: true }; app.windows.set(current.window, item); view.put(item)
+              const item = { ...(kind === 'timeout' ? withoutPoint : withoutImage), previewUnavailable: true, ...(issue ? { previewIssue: issue } : {}) }; app.windows.set(current.window, item); view.put(item)
             }
           }
         }
@@ -210,6 +219,42 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
     if (count > 0) watchers.set(sessionId, count); else watchers.delete(sessionId)
     schedule(!active && count <= 0, sessionId)
   })
+  const detachTurnSignal = (id: string): void => {
+    const previous = turnSignals.get(id)
+    if (previous) previous.signal.removeEventListener('abort', previous.stop)
+    turnSignals.delete(id)
+  }
+  const finishTurn = (id: string, status: NonNullable<PreviewWindow['activity']>): void => {
+    if (!activeTurns.delete(id)) { detachTurnSignal(id); return }
+    paused.set(id, status)
+    detachTurnSignal(id)
+    schedule(true, id)
+    for (const [windowId, controller] of captures) if (windowId.startsWith(`${encodeURIComponent(id)}/`)) { controller.abort(); captures.delete(windowId) }
+    for (const [agent, apps] of owners) if (agent.id === id) for (const app of apps.values()) for (const [windowId, item] of app.windows) {
+      clearPoint(item.id)
+      const { point: _point, ...rest } = item
+      const ended = { ...rest, working: false, activity: status }; app.windows.set(windowId, ended); view.put(ended)
+    }
+  }
+  const stopTurns = ctx.on('session/event', (session, event) => {
+    const id = session.id
+    if (event.type === 'turn/start') { pendingTurns.add(id); return }
+    if (event.type !== 'turn/end') return
+    pendingTurns.delete(id)
+    finishTurn(id, event.data.reason.kind === 'completed' ? 'completed' : event.data.reason.kind === 'aborted' ? 'stopped' : 'failed')
+  })
+  const listenTurnSignal = ctx.on as unknown as (event: string, listener: (id: string, signal: AbortSignal) => void) => () => void
+  const stopTurnSignals = listenTurnSignal.call(ctx, 'agent-loop/turn-signal', (id, signal) => {
+    detachTurnSignal(id)
+    const onAbort = (): void => {
+      pendingTurns.delete(id)
+      if (!activeTurns.has(id)) paused.set(id, 'stopped')
+      finishTurn(id, 'stopped')
+    }
+    turnSignals.set(id, { signal, stop: onAbort })
+    signal.addEventListener('abort', onAbort, { once: true })
+    if (signal.aborted) onAbort()
+  })
   const stop = ctx.on('tools/result', (exec, result) => {
     if (exec.name !== 'cua' || !exec.agent || disposed.has(exec.agent)) return
     const request = record(exec.arguments)
@@ -219,6 +264,15 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
     const method = request?.method
     if (typeof method !== 'string' || !params) return
     const agent = exec.agent
+    if (paused.has(agent.id) && !pendingTurns.has(agent.id)) return
+    if (pendingTurns.delete(agent.id)) {
+      paused.delete(agent.id)
+      for (const app of owners.get(agent)?.values() ?? []) for (const [windowId, item] of app.windows) {
+        if (item.activity) { const { activity: _activity, ...resumed } = item; app.windows.set(windowId, resumed); view.put(resumed) }
+      }
+    }
+    activeTurns.add(agent.id)
+    if (permissionBlocked.delete(agent.id)) schedule()
     let apps = owners.get(agent)
     if (!apps) { apps = new Map(); owners.set(agent, apps) }
     const value = result.isError ? undefined : record(result.value)
@@ -288,6 +342,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
     if (result.isError) { delete item.image; delete item.capturedAt }
     if (method === 'screenshot' && typeof value?.data === 'string' && typeof value.mimeType === 'string') {
       item.image = `data:${value.mimeType};base64,${value.data}`; item.capturedAt = Date.now(); item.previewUnavailable = false; item.windowUnavailable = false
+      delete item.previewIssue
       const bounds = record(value.bounds)
       if (typeof bounds?.width === 'number' && bounds.width > 0 && typeof bounds.height === 'number' && bounds.height > 0) app.windowSizes.set(selected, { width: bounds.width, height: bounds.height })
       if (typeof value.pixelWidth === 'number' && typeof value.pixelHeight === 'number' && value.pixelWidth > 0 && value.pixelHeight > 0) app.modelImages.set(selected, { image: item.image, width: value.pixelWidth, height: value.pixelHeight })
@@ -329,7 +384,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
       const latest = app.windows.get(selected)
       if (!latest) return
       clearPoint(id)
-      const { point: _point, ...rest } = latest
+      const { point: _point, previewIssue: _previewIssue, ...rest } = latest
       const next = { ...rest, image: `data:${shot.mimeType};base64,${shot.data}`, capturedAt: Date.now(), previewUnavailable: false, windowUnavailable: false }
       if (shot.bounds) {
         app.captures.set(selected, { image: next.image, width: shot.bounds.width, height: shot.bounds.height })
@@ -343,18 +398,21 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
       const code = record(error)?.code
       console.warn('[perse-cua] Native preview capture failed:', typeof code === 'string' && /^[A-Z0-9_]{1,64}$/.test(code) ? code : 'UNKNOWN')
       const kind = failureKind(code)
-      if (kind === 'connection' || kind === 'application') invalidateFrames(agent, handle, kind, 'previewUnavailable')
+      const issue: PreviewWindow['previewIssue'] = code === 'PERMISSION_DENIED' ? 'screenRecording' : code === 'WINDOW_UNAVAILABLE' ? 'window' : code === 'CAPTURE_BUSY' || kind === 'timeout' ? 'busy' : kind === 'connection' ? 'connection' : undefined
+      if (code === 'PERMISSION_DENIED') permissionBlocked.add(agent.id)
+      if (kind === 'connection' || kind === 'application') invalidateFrames(agent, handle, kind, 'previewUnavailable', issue)
       else {
         clearPoint(id); app.captures.delete(selected)
         const { point: _point, ...withoutPoint } = latest
         const { image: _image, capturedAt: _capturedAt, ...withoutImage } = withoutPoint
-        const next = { ...(kind === 'timeout' ? withoutPoint : withoutImage), previewUnavailable: true }
+        const next = { ...(kind === 'timeout' ? withoutPoint : withoutImage), previewUnavailable: true, ...(issue ? { previewIssue: issue } : {}) }
         app.windows.set(selected, next); view.put(next)
       }
     }).finally(() => { if (captures.get(id) === controller) captures.delete(id) })
   })
   const stopAgent = ctx.on('agent/disposed', ({ agent }) => {
     disposed.add(agent)
+    detachTurnSignal(agent.id); activeTurns.delete(agent.id); pendingTurns.delete(agent.id); paused.delete(agent.id); permissionBlocked.delete(agent.id)
     for (const id of captured.keys()) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) captured.delete(id)
     clients.delete(agent); lists.delete(agent); for (const id of dismissed) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { dismissed.delete(id); automatic.delete(id); appearances.delete(id); missing.delete(id) }; for (const id of automatic) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { automatic.delete(id); missing.delete(id) }; for (const id of appearances.keys()) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) appearances.delete(id); schedule(true, agent.id)
     for (const [id, controller] of captures) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { controller.abort(); captures.delete(id) }
@@ -377,6 +435,6 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
         clients.delete(agent); lists.delete(agent); for (const id of dismissed) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { dismissed.delete(id); automatic.delete(id); appearances.delete(id); missing.delete(id) }; for (const id of automatic) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { automatic.delete(id); missing.delete(id) }; for (const id of appearances.keys()) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) appearances.delete(id); schedule(true, agent.id)
       },
     },
-    close: () => { closed = true; if (refreshTimer) clearTimeout(refreshTimer); background?.abort(); watchers.clear(); watcherVersions.clear(); captured.clear(); lists.clear(); dismissed.clear(); automatic.clear(); appearances.clear(); missing.clear(); unsupported.clear(); discoveryStatus.clear(); stop(); stopAgent(); for (const controller of captures.values()) controller.abort(); captures.clear(); for (const id of pointTimers.keys()) clearPoint(id); clients.clear(); owners.clear() },
+    close: () => { closed = true; if (refreshTimer) clearTimeout(refreshTimer); background?.abort(); watchers.clear(); watcherVersions.clear(); paused.clear(); pendingTurns.clear(); activeTurns.clear(); permissionBlocked.clear(); for (const id of turnSignals.keys()) detachTurnSignal(id); captured.clear(); lists.clear(); dismissed.clear(); automatic.clear(); appearances.clear(); missing.clear(); unsupported.clear(); discoveryStatus.clear(); stop(); stopAgent(); stopTurns(); stopTurnSignals(); for (const controller of captures.values()) controller.abort(); captures.clear(); for (const id of pointTimers.keys()) clearPoint(id); clients.clear(); owners.clear() },
   }
 }

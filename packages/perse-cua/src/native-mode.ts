@@ -27,7 +27,7 @@ export function startNative(ctx: Context, config: provider.Config, hooks: Hooks)
       scope.effect(() => scope.systemPrompt.section({
         name: 'perse-cua:native-entry',
         order: scope.systemPrompt.getSectionOrder('TOOL_COMPUTER_USE'),
-        text: 'For macOS desktop interaction, prefer the registered cua tool and its application authorization flow. Do not load the external cua-driver skill for native cua. If it is already loaded, do not apply its CLI or MCP parameters to cua; follow the cua tool schema and native guidance. If a required capability such as typed browser tabs is unavailable, explain the limitation and use an explicitly configured compatible provider if available. Do not switch providers to bypass denied or revoked access.',
+        text: 'For macOS desktop interaction, use the registered cua tool and its application authorization flow. Do not use external cua-driver CLI or MCP tools. If a required capability is unavailable, explain the limitation. Do not switch providers to bypass denied or revoked access.',
       }))
     }
     catch (error) { console.error('[perse-cua] Native provider failed to start:', error); throw error }

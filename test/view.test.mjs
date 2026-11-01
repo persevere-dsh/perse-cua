@@ -1,4 +1,7 @@
 import test from 'node:test'
+
+// The external MCP backend is unavailable on macOS.
+const mcpTest = process.platform === 'darwin' ? test.skip : test
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -8,7 +11,7 @@ import { setTimeout as pause } from 'node:timers/promises'
 import { Context } from '@deepseek-ai/cordis'
 import { apply } from '../packages/perse-cua/lib/index.js'
 
-test('target windows keep distinct frames and screenshots retain the action session', async t => {
+mcpTest('target windows keep distinct frames and screenshots retain the action session', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'perse-baseline-'))
   const log = join(dir, 'calls')
   const ctx = new Context(); const tools = new Map()
@@ -35,7 +38,7 @@ test('target windows keep distinct frames and screenshots retain the action sess
 })
 
 
-test('model reads and token actions get display-only full-size captures', async t => {
+mcpTest('model reads and token actions get display-only full-size captures', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'perse-snapshot-')); const log = join(dir, 'calls')
   const ctx = new Context(); const tools = new Map()
   ctx.provide('tools', { register(tool) { tools.set(tool.name, tool); return () => tools.delete(tool.name) } })
@@ -73,7 +76,7 @@ test('presenter-only exposes the view without starting or registering driver too
 })
 
 
-test('preview reports an in-flight action and clears it when the driver responds', async t => {
+mcpTest('preview reports an in-flight action and clears it when the driver responds', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'perse-working-')); const log = join(dir, 'calls')
   const ctx = new Context(); const tools = new Map()
   ctx.provide('tools', { register(tool) { tools.set(tool.name, tool); return () => tools.delete(tool.name) } })
@@ -92,7 +95,7 @@ test('preview reports an in-flight action and clears it when the driver responds
 })
 
 
-test('a failed preview capture is visible and does not claim a new image', async t => {
+mcpTest('a failed preview capture is visible and does not claim a new image', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'perse-failure-')); const log = join(dir, 'calls')
   const ctx = new Context(); const tools = new Map()
   ctx.provide('tools', { register(tool) { tools.set(tool.name, tool); return () => tools.delete(tool.name) } })
@@ -110,7 +113,7 @@ test('a failed preview capture is visible and does not claim a new image', async
 })
 
 
-test('a click point is tied to an accepted capture of the same window and session', async t => {
+mcpTest('a click point is tied to an accepted capture of the same window and session', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'perse-point-')); const log = join(dir, 'calls')
   const ctx = new Context(); const tools = new Map()
   ctx.provide('tools', { register(tool) { tools.set(tool.name, tool); return () => tools.delete(tool.name) } })
@@ -138,7 +141,7 @@ test('a click point is tied to an accepted capture of the same window and sessio
 })
 
 
-test('a refused click or another session cannot produce an action point', async t => {
+mcpTest('a refused click or another session cannot produce an action point', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'perse-unmatched-')); const log = join(dir, 'calls')
   const ctx = new Context(); const tools = new Map()
   ctx.provide('tools', { register(tool) { tools.set(tool.name, tool); return () => tools.delete(tool.name) } })
@@ -162,7 +165,7 @@ test('a refused click or another session cannot produce an action point', async 
   await other.return()
 })
 
-test('a failed follow-up capture removes an action point', async t => {
+mcpTest('a failed follow-up capture removes an action point', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'perse-point-failure-')); const log = join(dir, 'calls')
   const ctx = new Context(); const tools = new Map()
   ctx.provide('tools', { register(tool) { tools.set(tool.name, tool); return () => tools.delete(tool.name) } })
@@ -192,7 +195,7 @@ test('presenter entry cannot start a driver when passed ordinary plugin configur
   dispose()
 })
 
-test('disposing a Cordis plugin terminates its own driver and unregisters tools', async t => {
+mcpTest('disposing a Cordis plugin terminates its own driver and unregisters tools', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'perse-dispose-')); const log = join(dir, 'calls')
   const ctx = new Context(); const tools = new Map()
   ctx.provide('tools', { register(tool) { tools.set(tool.name, tool); return () => tools.delete(tool.name) } })
@@ -221,7 +224,7 @@ test('disposing the presenter plugin closes its preview stream', async () => {
   assert.equal((await reader.next()).done, true)
 })
 
-test('a read of a closed window reports failure and retains its last frame', async t => {
+mcpTest('a read of a closed window reports failure and retains its last frame', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'perse-window-closed-')); const log = join(dir, 'calls')
   const ctx = new Context(); const tools = new Map()
   ctx.provide('tools', { register(tool) { tools.set(tool.name, tool); return () => tools.delete(tool.name) } })
@@ -243,7 +246,7 @@ test('a read of a closed window reports failure and retains its last frame', asy
   await reader.return()
 })
 
-test('off-screen enumeration keeps the last frame and time without inventing an action point', async t => {
+mcpTest('off-screen enumeration keeps the last frame and time without inventing an action point', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'perse-offscreen-')); const log = join(dir, 'calls')
   const ctx = new Context(); const tools = new Map()
   ctx.provide('tools', { register(tool) { tools.set(tool.name, tool); return () => tools.delete(tool.name) } })
@@ -265,7 +268,7 @@ test('off-screen enumeration keeps the last frame and time without inventing an 
   await reader.return()
 })
 
-test('an empty accessibility tree does not imply an on-screen window is unavailable', async t => {
+mcpTest('an empty accessibility tree does not imply an on-screen window is unavailable', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'perse-empty-tree-')); const log = join(dir, 'calls')
   const ctx = new Context(); const tools = new Map()
   ctx.provide('tools', { register(tool) { tools.set(tool.name, tool); return () => tools.delete(tool.name) } })

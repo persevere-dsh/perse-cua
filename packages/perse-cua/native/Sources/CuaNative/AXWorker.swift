@@ -61,10 +61,19 @@ struct ApplicationLaunch: Sendable {
     let handle: String
     let application: InstalledApplication
     let authorization: JSONValue
+    let newInstance: Bool
+    let previousPIDs: Set<Int32>
+}
+private struct PendingApplication {
+    let application: InstalledApplication
+    let authorization: JSONValue
+    let newInstance: Bool
+    let previousPIDs: Set<Int32>
 }
 private enum ApplicationTarget {
     case running(ProcessIdentity)
-    case pending(InstalledApplication, JSONValue)
+    case pending(PendingApplication)
+    case launching(PendingApplication)
 }
 enum DriverOutcome: Sendable { case result(JSONValue), hover(JSONValue, WindowRoute, CGPoint), capture(CaptureTarget), foreground(ForegroundPlan), launch(ApplicationLaunch), paste(PastePlan) }
 
@@ -239,18 +248,31 @@ actor AXWorker {
         try NativePlatform.requireUnlocked(locked)
         if method == "getApp" {
             let selector = try params.string("selector")
+            let newInstance = try params.optionalString("instance") == "new"
             let matches = catalog.applications.filter { $0.matches(selector) }
-            if matches.isEmpty, let installed {
+            if newInstance && Int32(selector) != nil {
+                throw RequestParameters.invalid("Select an installed application by name, bundle ID or path to start a new instance")
+            }
+            if (matches.isEmpty || newInstance), let installed {
                 let authorization = try ApplicationAuthorization.describeInstalled(installed)
-                let previous = targets.filter { if case .pending(let app, _) = $0.value { return app.path == installed.path }; return false }
-                if let same = previous.first(where: { if case .pending(_, let value) = $0.value { return value == authorization }; return false }) {
-                    return .result(pendingApplication(installed, handle: same.key, authorization: authorization))
+                if !newInstance {
+                    let previous = targets.filter { if case .pending(let value) = $0.value { return !value.newInstance && value.application.path == installed.path }; return false }
+                    if let same = previous.first(where: { if case .pending(let value) = $0.value { return value.authorization == authorization }; return false }) {
+                        return .result(pendingApplication(installed, handle: same.key, authorization: authorization))
+                    }
+                    for (handle, _) in previous { forget(handle) }
                 }
-                for (handle, _) in previous { forget(handle) }
                 let handle = try identifier("app")
-                targets[handle] = .pending(installed, authorization)
+                let previousPIDs = Set(catalog.applications.filter { app in
+                    app.matches(selector) || app.executablePath.map {
+                        URL(fileURLWithPath: $0).resolvingSymlinksInPath().path == installed.executablePath
+                    } == true
+                }.map(\.pid))
+                targets[handle] = .pending(PendingApplication(application: installed, authorization: authorization,
+                                                              newInstance: newInstance, previousPIDs: previousPIDs))
                 return .result(pendingApplication(installed, handle: handle, authorization: authorization))
             }
+            if newInstance { throw NativeFailure(code: "APP_UNAVAILABLE", message: "Installed application for a new instance was not found") }
             guard !matches.isEmpty else { throw NativeFailure(code: "APP_UNAVAILABLE", message: "No running or installed application matches selector") }
             guard matches.count == 1, let app = matches.first else { throw NativeFailure(code: "AMBIGUOUS_APP", message: "Select an exact PID from listApps") }
             let identity = try NativePlatform.identity(app.pid)
@@ -263,14 +285,24 @@ actor AXWorker {
         }
         let handle = try params.string("appHandle")
         if method == "launchApp" {
-            guard case .pending(let app, let authorization)? = targets[handle] else {
+            guard case .pending(let pending)? = targets[handle] else {
                 throw NativeFailure(code: "STALE_APP", message: "Pending application selection expired; call getApp again")
             }
+            let app = pending.application, authorization = pending.authorization
             guard try ApplicationAuthorization.describeInstalled(app) == authorization else {
                 forget(handle)
                 throw NativeFailure(code: "STALE_APP", message: "Application executable changed before launch; select it again")
             }
-            return .launch(ApplicationLaunch(handle: handle, application: app, authorization: authorization))
+            let currentPIDs = catalog.applications.filter { process in
+                process.executablePath.map {
+                    URL(fileURLWithPath: $0).resolvingSymlinksInPath().path == app.executablePath
+                } == true
+            }.map(\.pid)
+            let launching = PendingApplication(application: app, authorization: authorization, newInstance: pending.newInstance,
+                                               previousPIDs: pending.previousPIDs.union(currentPIDs))
+            targets[handle] = .launching(launching)
+            return .launch(ApplicationLaunch(handle: handle, application: app, authorization: authorization,
+                                             newInstance: launching.newInstance, previousPIDs: launching.previousPIDs))
         }
         let identity = try validateIdentity(handle)
         if method == "listWindows" {
@@ -479,10 +511,21 @@ actor AXWorker {
     }
     func finishLaunch(_ plan: ApplicationLaunch, pid: Int32) throws -> JSONValue {
         try cancellation.check()
-        guard case .pending(let app, let original)? = targets[plan.handle], app == plan.application, original == plan.authorization,
-              try ApplicationAuthorization.describeInstalled(app) == original else {
+        guard case .launching(let pending)? = targets[plan.handle], pending.application == plan.application,
+              pending.authorization == plan.authorization,
+              pending.newInstance == plan.newInstance, pending.previousPIDs == plan.previousPIDs,
+              try ApplicationAuthorization.describeInstalled(pending.application) == pending.authorization else {
             forget(plan.handle)
             throw NativeFailure(code: "STALE_APP", message: "Application selection changed during launch")
+        }
+        let app = pending.application, original = pending.authorization
+        let alreadyAcquired = targets.values.contains {
+            if case .running(let identity) = $0 { return identity.pid == pid }
+            return false
+        }
+        if plan.newInstance && (plan.previousPIDs.contains(pid) || alreadyAcquired) {
+            forget(plan.handle)
+            throw NativeFailure(code: "APP_UNAVAILABLE", message: "The operating system did not create a new application instance")
         }
         let identity = try NativePlatform.identity(pid)
         let actual = try ApplicationAuthorization.describe(identity, name: app.name, expectedExecutablePath: app.executablePath)

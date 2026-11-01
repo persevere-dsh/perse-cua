@@ -1,10 +1,10 @@
 {
   "format": "perse-cua-helper-v1",
   "arch": "x64",
-  "sha256": "5467bdb8101c56aa98a2755ab953dec020a67ef149ca17135a5990183df9f690",
-  "size": 1188608,
+  "sha256": "015e22e87080f52b158e9cd0f8279a0cee8447807427f36c92a8e9187ace6657",
+  "size": 1201840,
   "minimum_macos": "14.0",
   "signature": "local",
   "gui_verified": false,
-  "sourceSha256": "a2adee5bad29511a3e7c1deb3709f25f08ce3e9c853cf4666b1fc972815ad7ca"
+  "sourceSha256": "42cc34f00b83ff7bfbbfda244f145bd641118a6ca4a9f8650e1e511c8f156b21"
 }

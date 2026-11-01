@@ -4,19 +4,19 @@ English | [中文](README.zh.md)
 
 `perse` = persevere
 
-Desktop automation for DSH: macOS defaults to the native `cua` tool; other platforms default to [cua-driver](https://github.com/trycua/cua) MCP.
+Desktop automation for DSH: macOS uses the native `cua` tool; other platforms default to [cua-driver](https://github.com/trycua/cua) MCP.
 
 **Part of Persevere with DSH**
 
 -----
 
-On macOS 14 or later the default backend is the experimental DSH native provider. The model uses the registered `cua` tool and its per-application authorization flow directly; it supports background AX operations and screenshots, but not typed browser tabs. For those, explicitly configure the MCP backend and follow its authorization; never switch providers to bypass denied or revoked access. It asks for application consent and requires the host to provide the DSH 0.2.1-rc.2 services. Its preview captures authorized windows after observed operations without changing model screenshot coordinates. Controlled macOS validation covered window-scoped AX reads, captures, reversible AX clicks and human observation of cursor position and fade. Separate preview-host checks covered multi-window refresh and session isolation. These checks do not establish universal background coordinate clicks or tracking-only hover. The driver measurements and behavior below apply to `backend: mcp`.
+On macOS 14 or later this plugin uses the DSH native provider and rejects the MCP backend and MCP driver settings. The model uses the registered `cua` tool and its per-application authorization flow. Background AX operations and screenshots are supported; typed browser tabs are not. If a capability is unavailable, report the limitation. A profile host must support profile tool admission. Preview captures use the same application authorization without changing model screenshot coordinates. The driver measurements and behavior below apply to `backend: mcp` on other platforms.
 
 Native hover uses AX alternate UI when available. Otherwise it returns `UNSUPPORTED` without activating the app or moving the system pointer; use an advertised accessibility action or operate the control manually. Leaving previously revealed alternate UI may restore it before this error. A newly revealed alternate UI reports `dispatched: true`; entering an already revealed descendant reports `dispatched: false` because no new AX action is sent; consumers must accept either boolean. Both report `verified: false`, `hoverRoute: "accessibility"`, and `systemPointerMoved: false`; inspect fresh state to confirm the effect. Successful hover displays a virtual cursor at the target position observed before the action; it may be stale if the target moves during the action and does not verify the result. Disconnecting drops hover tracking without restoring the application UI. AX clicks with available target geometry also display the native cursor and click marker. The marker remains fully visible for 1.5 seconds before fading over 0.5 seconds, unless another input or an error hides it sooner. The separate cursor window is excluded from native window captures.
 
-Existing macOS configurations with MCP-specific options such as `command`, `args`, `allow`, or `indicator` must add `backend: mcp`; without it startup reports an error instead of silently selecting the external driver. Profiles with an existing native provider can use `presenterOnly: true` to expose the view service, but automatic native previews require this plugin to own the provider and its authorization lifecycle.
+Existing macOS configurations must remove `backend: mcp` and MCP-specific options such as `command`, `args`, `allow`, and `indicator`. A compatible host suppresses known conflicting CUA driver entries and migrates matching saved profile entries with a backup. For a read-only presenter in a macOS profile, use the `perse-cua/presenter` entrypoint; `presenterOnly: true` on the main entry cannot release the native requirement. Automatic native previews require this plugin to own the provider and its authorization lifecycle.
 
-## What the MCP backend solves
+## What the MCP backend solves on other platforms
 
 cua-driver 0.28.1 advertises **56 tools**. Every one of them is attached to *every*
 model request whether or not the task touches a GUI. Measured on the released driver:
@@ -31,7 +31,7 @@ And once a task *is* driving an app, a raw window snapshot is mostly menu bar: o
 rendered bytes**. It can never be an automation target — menu items are reached with
 `invoke_menu` by path — so it is pure grounding noise.
 
-## What the MCP backend does
+## What the MCP backend does on other platforms
 
 1. **Condenses descriptions** to their first sentence — this is where the default saving
    comes from. Parameter schemas pass through untouched, so every tool still validates.
@@ -44,7 +44,7 @@ rendered bytes**. It can never be an automation target — menu items are reache
 3. **Strips the accessibility menu bar** out of rendered trees, leaving the window block
    byte-identical — including the original element numbering, because an `element_token`
    must keep resolving against the snapshot the driver cached.
-4. **Turns on the macOS MCP best experience** by default: at boot the plugin opens a named
+4. **Enables the MCP best experience** by default: at boot the plugin opens a named
    driver session (default label `perse-cua`) and shows its **agent cursor** — the
    Codex-style effect where you watch a visible cursor do the work in a background
    window while your own mouse, keyboard focus, and frontmost app stay untouched.
@@ -70,7 +70,7 @@ The condensed-everything row is the honest upper bound on what is free. An allow
 a **capability ceiling**: a tool missing from it is invisible to the model rather than
 merely unused, and the model cannot ask for what it cannot see.
 
-If request size matters more than reach, opt in to the aggressive cut explicitly:
+On platforms that use the MCP backend, opt in to the aggressive cut explicitly if request size matters more than reach:
 
 ```yaml
 - id: perse-cua
@@ -82,7 +82,7 @@ If request size matters more than reach, opt in to the aggressive cut explicitly
 ## Use this plugin
 
 `perse-cua` ships `dsh.bundle.patch`, so installing it already registers its loader row.
-The macOS default needs no backend override. To select the external MCP driver, add a **config override** — not a second `insert`, which would collide on the loader id
+macOS requires the native backend and no backend override. On other platforms, select the external MCP driver with a **config override** — not a second `insert`, which would collide on the loader id
 (preflight rule R-07):
 
 ```yaml
@@ -93,20 +93,19 @@ The macOS default needs no backend override. To select the external MCP driver, 
     serverName: cua
 ```
 
-Then install it and **remove any plain `dsh-mcp-client` row pointed at the same driver** —
-this plugin owns that MCP connection itself:
+Install the plugin and remove any plain `dsh-mcp-client` row pointed at the same driver:
 
 ```sh
 npm pack --workspace perse-cua
-dsh plugin --profile web add ./perse-cua-0.3.1-rc.2.tgz
+dsh plugin --profile web add ./perse-cua-0.3.1-rc.3.tgz
 ```
 
 ### Configuration
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `presenterOnly` | `false` | Provide only the preview service; do not observe native tool results or start a driver |
-| `backend` | `native` on macOS; `mcp` elsewhere | Select `native` or `mcp`; native requires macOS 14 or later |
+| `presenterOnly` | `false` | Provide only the preview service outside macOS profiles; macOS profiles use `perse-cua/presenter` |
+| `backend` | `native` on macOS; `mcp` elsewhere | macOS requires `native` and macOS 14 or later; `mcp` is available on other platforms |
 | `command` | `cua-driver` | Driver executable |
 | `args` | `["mcp"]` | Arguments for the driver |
 | `env` | — | Extra environment for the child process |
@@ -128,7 +127,7 @@ silently ignored, so a driver upgrade that renames a tool is visible.
 
 ## Driving previews
 
-Native previews refresh after observed operations using the same application authorization. Closing a preview suppresses automatic rediscovery; a later operation on that window can show it again, while listing windows leaves it closed. A failed call clears the image and triggers a fresh capture; only a failed preview capture marks the screenshot unavailable. A window-list failure retains the last images, reports the affected application and retries without stopping other applications. Previews are scoped to the selected Session and the Remote gateway authorizes access to that Session.
+Native previews refresh after observed operations using the same application authorization. Closing a preview suppresses automatic rediscovery; a later operation on that window can show it again, while listing windows leaves it closed. A failed call clears the image and triggers a fresh capture; only a failed preview capture marks the screenshot unavailable. Permission denial clears affected frames and suspends automatic capture until another CUA operation. Other discovery failures report the affected application without stopping unrelated applications. Turn completion or cancellation stops background captures and marks the retained frame; a later turn resumes capture after it uses CUA. Previews are scoped to the selected Session and the Remote gateway authorizes access to that Session.
 
 With the MCP backend, the plugin streams separate window images to its browser client. It identifies targets from window reads and window-targeted actions, and preserves the action session when requesting a preview. Select a card to enlarge it, switch windows, or close a card. The image time is the response receipt time. A brief click indicator appears only when the driver accepts a pixel click bound to the same window, session, and captured image; it is an action marker, while the actual agent cursor is rendered by the driver on the target window and may not appear in window screenshots. Actions without a verified pixel position show no marker. The plugin checks the target window list before publishing a preview; an off-screen or absent window keeps its last image and time and is marked unavailable. If capture or enumeration fails, the card marks the screenshot unavailable; dismiss it when no longer needed. The client clears stale cards and retries an unexpectedly ended preview stream. A preview requires an Agent owner and the host Remote gateway and client slots.
 
@@ -144,13 +143,11 @@ The `perse-cua/presenter` entry registers only the preview service and never sta
 
 ## Platform notes
 
-- The MCP backend on macOS needs Accessibility **and** Screen Recording. Run `cua-driver permissions grant`
-  once: the driver launches `CuaDriver.app` through LaunchServices so the TCC grant
-  attaches to `com.trycua.driver`, not to the harness.
-- Actions run in the background by default and do not steal the user's focus.
+- The macOS native backend needs Accessibility and Screen Recording permission for the responsible host/helper.
+- MCP backend actions run in the background by default and do not steal the user's focus.
   `move_cursor` in its default window scope paints the agent overlay only; moving the
   real OS pointer needs `scope: "desktop"`, which is a foreground takeover.
-- The menu-bar indicator starts with the plugin and exits after 60 seconds without
+- The legacy MCP menu-bar indicator starts with the plugin where supported and exits after 60 seconds without
   a state update. The next non-read-only tool call restarts it, also after choosing
   **Hide indicator** or a failed launch; read-only calls do not restart it. Concurrent
   calls in one plugin instance share a pending launch. Unloading the plugin removes

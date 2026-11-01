@@ -57,3 +57,45 @@ private func fixtureApplication(_ directory: URL, name: String, identifier: Stri
     let after = try ApplicationAuthorization.describeInstalled(app)
     #expect(before["id"] != after["id"])
 }
+
+@Test(.enabled(if: NativePlatform.sessionLocked() == false))
+func newInstanceSelectionsAreDistinctAndCannotLaunchTwice() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("dsh-cua-apps-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let app = try fixtureApplication(root, name: "Fixture", identifier: "test.dsh.identity." + UUID().uuidString)
+    let process = ApplicationInfo(pid: 123, name: app.name, bundleID: app.bundleID, path: app.path,
+                                  executablePath: app.executablePath, regular: true)
+    let catalog = ApplicationCatalogSnapshot(applications: [process], frontPID: nil)
+    let worker = AXWorker(cancellation: CancellationLatch(), axTimeout: 1, textEventInterval: 0)
+    let request = try NativeRequest(data: Data(#"{"id":"app","method":"getApp","params":{"selector":"Fixture","instance":"new"}}"#.utf8))
+    let parameters = try RequestParameters(request)
+    guard case .result(let first) = try await worker.execute("getApp", params: parameters, catalog: catalog, installed: app),
+          case .result(let second) = try await worker.execute("getApp", params: parameters, catalog: catalog, installed: app) else {
+        Issue.record("Expected pending application selections")
+        return
+    }
+    let handle = try #require(first["appHandle"].string)
+    #expect(second["appHandle"].string != handle)
+    let launchJSON = try JSONEncoder().encode(JSONValue.object([
+        "id": .string("launch"), "method": .string("launchApp"), "params": .object(["appHandle": .string(handle)]),
+    ]))
+    let launchParams = try RequestParameters(NativeRequest(data: launchJSON))
+    let laterProcess = ApplicationInfo(pid: 456, name: app.name, bundleID: app.bundleID, path: app.path,
+                                       executablePath: app.executablePath, regular: true)
+    let launchCatalog = ApplicationCatalogSnapshot(applications: [process, laterProcess], frontPID: nil)
+    guard case .launch(let plan) = try await worker.execute("launchApp", params: launchParams, catalog: launchCatalog) else {
+        Issue.record("Expected authorized launch continuation")
+        return
+    }
+    #expect(plan.newInstance)
+    #expect(plan.previousPIDs.contains(123))
+    #expect(plan.previousPIDs.contains(456))
+    do {
+        _ = try await worker.execute("launchApp", params: launchParams, catalog: catalog)
+        Issue.record("A pending launch was dispatched twice")
+    } catch let error as NativeFailure { #expect(error.code == "STALE_APP") }
+    do {
+        _ = try await worker.finishLaunch(plan, pid: 123)
+        Issue.record("An existing process was accepted as a new instance")
+    } catch let error as NativeFailure { #expect(error.code == "APP_UNAVAILABLE") }
+}

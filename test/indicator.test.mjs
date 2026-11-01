@@ -5,6 +5,9 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { setTimeout as pause } from 'node:timers/promises'
 import test from 'node:test'
+
+// The external MCP backend is unavailable on macOS.
+const mcpTest = process.platform === 'darwin' ? test.skip : test
 import { apply } from '../packages/perse-cua/lib/index.js'
 import { Context } from '@deepseek-ai/cordis'
 
@@ -59,7 +62,7 @@ function harness(t, settings = {}, config = {}) {
   return { root, stateFile, tools, dispose, events, ofType }
 }
 
-test('indicator recovers on the next action after the idle helper exits', async t => {
+mcpTest('indicator recovers on the next action after the idle helper exits', async t => {
   const h = harness(t, { exitBarrier: true })
   await until(() => h.ofType('helper-ready').length === 1, 'initial helper')
   const firstPid = h.ofType('helper-ready')[0].pid
@@ -78,7 +81,7 @@ test('indicator recovers on the next action after the idle helper exits', async 
   assert.ok(h.ofType('launcher').every(event => event.args.includes('-W')))
 })
 
-test('indicator launch failure is cosmetic and the next action retries', async t => {
+mcpTest('indicator launch failure is cosmetic and the next action retries', async t => {
   const h = harness(t, { failedLaunches: 1 })
   await until(() => h.ofType('launch-failed').length === 1, 'failed launch')
   await until(() => !alive(h.ofType('launcher')[0].pid), 'failed launcher exits')
@@ -88,7 +91,7 @@ test('indicator launch failure is cosmetic and the next action retries', async t
   assert.equal(h.ofType('launcher').length, 2)
 })
 
-test('concurrent actions share one pending indicator launch', async t => {
+mcpTest('concurrent actions share one pending indicator launch', async t => {
   const h = harness(t, { launchDelayMs: 150 })
   await until(() => h.ofType('launcher').length === 1, 'pending launch')
   await Promise.all(Array.from({ length: 20 }, () => h.tools.get('mcp__cua__click').execute({})))
@@ -96,7 +99,7 @@ test('concurrent actions share one pending indicator launch', async t => {
   assert.equal(h.ofType('launcher').length, 1)
 })
 
-test('dispose ends the launcher, removes state and prevents later activity from reviving it', async t => {
+mcpTest('dispose ends the launcher, removes state and prevents later activity from reviving it', async t => {
   const h = harness(t)
   await until(() => h.ofType('helper-ready').length === 1, 'initial helper')
   const action = h.tools.get('mcp__cua__click')
@@ -114,7 +117,7 @@ test('dispose ends the launcher, removes state and prevents later activity from 
   assert.equal(h.tools.size, 0)
 })
 
-test('dispose during asynchronous boot prevents a delayed indicator launch', async t => {
+mcpTest('dispose during asynchronous boot prevents a delayed indicator launch', async t => {
   const h = harness(t, { sessionDelayMs: 200 }, { bestExperience: true })
   await until(() => h.events().some(event => event.type === 'tool-call' && event.name === 'start_session'), 'pending cursor setup')
   h.dispose()
@@ -123,7 +126,7 @@ test('dispose during asynchronous boot prevents a delayed indicator launch', asy
   assert.equal(existsSync(h.stateFile), false)
 })
 
-test('disabled indicator does not launch or write state during tool calls', async t => {
+mcpTest('disabled indicator does not launch or write state during tool calls', async t => {
   const h = harness(t, {}, { indicator: false })
   await until(() => h.tools.has('mcp__cua__click'), 'tool registration')
   await h.tools.get('mcp__cua__click').execute({})

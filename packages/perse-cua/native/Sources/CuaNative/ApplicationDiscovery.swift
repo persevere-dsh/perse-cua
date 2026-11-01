@@ -63,12 +63,13 @@ struct InstalledApplication: Sendable, Equatable {
         return apps.values.sorted { $0.path < $1.path }
     }
 
-    static func launch(_ app: InstalledApplication, cancellation: CancellationLatch) async throws -> Int32 {
+    static func launch(_ app: InstalledApplication, newInstance: Bool, cancellation: CancellationLatch) async throws -> Int32 {
         try cancellation.check()
         try NativePlatform.requireUnlocked(NativePlatform.sessionLocked())
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = false
         configuration.addsToRecentItems = false
+        configuration.createsNewApplicationInstance = newInstance
         let pid: Int32 = try await withCheckedThrowingContinuation { continuation in
             NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: app.path), configuration: configuration) { running, error in
                 if let error { continuation.resume(throwing: error) }

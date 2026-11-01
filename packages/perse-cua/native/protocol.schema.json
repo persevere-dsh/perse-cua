@@ -104,6 +104,13 @@
             "selector": {
               "type": "string",
               "minLength": 1
+            },
+            "instance": {
+              "type": "string",
+              "enum": [
+                "existingOrLaunch",
+                "new"
+              ]
             }
           },
           "required": [
@@ -202,9 +209,6 @@
             "appHandle": {
               "type": "string",
               "minLength": 1
-            },
-            "displayOnly": {
-              "type": "boolean"
             }
           },
           "required": [
@@ -982,9 +986,6 @@
               "type": "integer",
               "exclusiveMinimum": 0,
               "maximum": 4294967295
-            },
-            "displayOnly": {
-              "type": "boolean"
             }
           },
           "required": [

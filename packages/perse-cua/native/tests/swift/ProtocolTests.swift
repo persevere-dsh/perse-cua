@@ -3,6 +3,13 @@ import Foundation
 import Testing
 @testable import CuaNative
 
+@Test func acceptsExplicitApplicationInstanceIntent() throws {
+    let valid = try NativeRequest(data: Data(#"{"id":"app","method":"getApp","params":{"selector":"Calculator","instance":"new"}}"#.utf8))
+    #expect(try RequestParameters(valid).optionalString("instance") == "new")
+    let invalid = try NativeRequest(data: Data(#"{"id":"app","method":"getApp","params":{"selector":"Calculator","instance":"always"}}"#.utf8))
+    #expect(throws: NativeFailure.self) { try RequestParameters(invalid) }
+}
+
 @Test func preservesJSONKindsAndNulls() throws {
     let value = JSONValue.object([
         "missing": .null,

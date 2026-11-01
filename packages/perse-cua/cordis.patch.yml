@@ -5,10 +5,9 @@
 # own cordis.patch.yml; do ONE of the two, never both — the loader id must be
 # unique (preflight rule R-07).
 #
-# On macOS this row defaults to the native `cua` provider. On other platforms,
-# or with `backend: mcp`, it owns the external driver connection. Do not add a
-# second MCP row for the same driver.
+# On macOS this row uses the native `cua` provider. On other platforms it owns
+# the external driver connection. Do not add a second MCP row for the same driver.
 - insert:
     - id: perse-cua
       name: perse-cua
-      description: Desktop automation with native macOS and external MCP backends
+      description: Desktop automation with native macOS or external MCP on other platforms

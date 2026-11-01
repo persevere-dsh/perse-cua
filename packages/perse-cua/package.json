@@ -1,6 +1,6 @@
 {
   "name": "perse-cua",
-  "version": "0.3.1-rc.2",
+  "version": "0.3.1-rc.3",
   "private": true,
   "description": "perse-cua: front cua-driver's desktop-automation tools without their schema weight, for Persevere with DSH (perse = persevere)",
   "type": "module",
@@ -64,6 +64,14 @@
     "vendor/**"
   ],
   "dsh": {
+    "toolAdmission": {
+      "darwin": {
+        "requiredTools": ["cua"],
+        "denyMcpCommands": ["cua-driver"],
+        "denyProviderPackages": ["@deepseek-ai/dsh-experimental-computer-use-cua-driver-native"]
+      },
+      "excludeEntrypoints": ["perse-cua/presenter"]
+    },
     "bundle": {
       "patch": "cordis.patch.yml"
     },
@@ -79,7 +87,7 @@
   "scripts": {
     "build": "cd ../.. && npm run build",
     "build:indicator": "bash ../../scripts/build-indicator.sh",
-    "prepack": "cd ../.. && node scripts/verify-native.mjs && node scripts/prepare-package-docs.mjs"
+    "prepack": "cd ../.. && node scripts/verify-native.mjs && node scripts/verify-cua-bridge.mjs && node scripts/prepare-package-docs.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",

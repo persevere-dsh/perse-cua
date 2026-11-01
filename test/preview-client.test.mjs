@@ -107,6 +107,8 @@ test('preview immediately clears removed frames during action animation and reta
     await act(async () => { root.update(element({ id: original.id, title: 'One', action: 'click', previewUnavailable: true })) })
     assert.equal(root.root.findAllByType('img').length, 0, 'permission failure must clear the frame immediately')
     assert.deepEqual(root.root.findAll(node => node.props.style?.placeItems === 'center')[0].children, ['unavailable'])
+    await act(async () => { root.update(element({ id: original.id, title: 'One', action: 'click', previewUnavailable: true, previewIssue: 'screenRecording' })) })
+    assert.deepEqual(root.root.findAll(node => node.props.style?.placeItems === 'center')[0].children, ['screenRecording'])
     await act(async () => { root.update(element(original)) })
     assert.equal(root.root.findAllByType('img').length, 1)
     await act(async () => { root.update(null) })

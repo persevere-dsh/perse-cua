@@ -1,4 +1,7 @@
 import test from 'node:test'
+
+// The external MCP backend is unavailable on macOS.
+const mcpTest = process.platform === 'darwin' ? test.skip : test
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -11,7 +14,7 @@ const { apply } = await import(pathToFileURL(entry))
 const fixture = fileURLToPath(new URL('./fixtures/session-driver.mjs', import.meta.url))
 async function until(check) { for (let i = 0; i < 300; i++) { if (check()) return; await pause(10) } throw new Error('driver did not reach expected state') }
 
-test('implicit transport survives idle, plugin reload and another instance without reviving explicit sessions', async t => {
+mcpTest('implicit transport survives idle, plugin reload and another instance without reviving explicit sessions', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'perse-session-'))
   const log = join(dir, 'calls'); const expired = join(dir, 'expired'); writeFileSync(log, '')
   const records = () => readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse)

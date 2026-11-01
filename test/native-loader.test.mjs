@@ -30,12 +30,19 @@ async function host() {
   return ctx
 }
 
-test('macOS legacy driver settings require an explicit MCP backend', { skip: process.platform !== 'darwin' }, () => {
+test('macOS rejects MCP backend and driver settings before starting a provider', { skip: process.platform !== 'darwin' }, () => {
   const ctx = new Context()
-  assert.throws(() => Main.apply(ctx, { command: '/fixture' }), /require backend: mcp explicitly/)
-  assert.throws(() => Main.apply(ctx, { allow: ['click'] }), /require backend: mcp explicitly/)
+  assert.throws(() => Main.apply(ctx, { backend: 'mcp' }), /requires the native backend/)
+  assert.throws(() => Main.apply(ctx, { backend: 'mcp', command: '/fixture' }), /requires the native backend/)
+  assert.throws(() => Main.apply(ctx, { command: '/fixture' }), /remove MCP driver settings/)
+  assert.throws(() => Main.apply(ctx, { allow: ['click'] }), /remove MCP driver settings/)
   assert.throws(() => Main.apply(ctx, { backend: 'native', args: [] }), /cannot use MCP driver settings/)
   assert.throws(() => Main.apply(ctx, { backend: 'native', helperPath: '/nonexistent/perse-cua-helper' }), /unavailable or not executable/)
+  ctx.provide('profileContext', {})
+  assert.throws(() => Main.apply(ctx, { presenterOnly: true }), /use the perse-cua\/presenter entrypoint/)
+  assert.throws(() => Main.apply(ctx, {}), /requires DSH profile tool admission version 1/)
+  ctx.provide('profileToolAdmission', { version: 0 })
+  assert.throws(() => Main.apply(ctx, {}), /requires DSH profile tool admission version 1/)
 })
 
 test('an existing native provider rejects a second provider before activation', { skip: process.platform !== 'darwin' }, async () => {
@@ -80,48 +87,40 @@ test('a provider that wins while dependencies load produces an explicit startup 
   } finally { console.error = previous; await ctx.fiber.dispose() }
 })
 
-test('macOS default and explicit MCP use one loader entry and stop on disable', { skip: process.platform !== 'darwin' }, async () => {
+test('macOS native loader entry stops on disable', { skip: process.platform !== 'darwin' }, async () => {
   const ctx = await host()
-  const root = await mkdtemp(join(tmpdir(), 'perse-loader-'))
   try {
-    const log = join(root, 'calls'), expired = join(root, 'expired')
-    await writeFile(log, '')
     await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: {} })
     await ctx.loader.await()
     await waitFor(() => ctx.computerUse?.providerName === 'dsh-cua' && ctx.tools.get('cua'))
     assert.equal(ctx.tools.get('mcp__cua__get_window_state'), undefined)
+    const schema = ctx.tools.schemas().find(tool => tool.name === 'cua').parameters
+    assert.deepEqual(schema.required, ['method', 'params'])
+    assert.ok(schema.properties.method.enum.includes('saveScreenshot'))
     const removeSkillCatalog = ctx.systemPrompt.section({ name: 'fixture:skill-catalog', order: 0, text: 'Available skill: cua-driver (CLI or MCP). Load the skill for GUI tasks.' })
     const guidance = renderPrompt(await ctx.systemPrompt.assemble())
-    assert.match(guidance, /prefer the registered cua tool and its application authorization flow/ )
+    assert.match(guidance, /use the registered cua tool and its application authorization flow/ )
     assert.match(guidance, /Available skill: cua-driver/ )
-    assert.match(guidance, /Do not load the external cua-driver skill for native cua/ )
-    assert.match(guidance, /do not apply its CLI or MCP parameters to cua; follow the cua tool schema and native guidance/ )
-    assert.match(guidance, /typed browser tabs is unavailable/ )
+    assert.match(guidance, /Do not use external cua-driver CLI or MCP tools/ )
+    assert.match(guidance, /If a required capability is unavailable, explain the limitation/ )
     assert.match(guidance, /Do not switch providers to bypass denied or revoked access/ )
+    const removePtc = ctx.provide('ptcRuntime', { programFormat: 'repl' })
+    const replGuidance = renderPrompt(await ctx.systemPrompt.assemble())
+    assert.match(replGuidance, /vendor\/dsh-cua-bridge\.js/)
+    assert.doesNotMatch(replGuidance, /@deepseek-ai\/dsh-cua\/bridge/)
+    removePtc()
     const entry = ctx.loader.resolve('perse-cua'), fiber = entry.fiber
     const grants = fiber.config.allowedApps
     await ctx.loader.update('perse-cua', { config: { allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture' }] } })
     await ctx.loader.await()
     assert.equal(entry.fiber, fiber)
     assert.equal(grants.get()[0].name, 'Fixture')
-    const fixture = fileURLToPath(new URL('./fixtures/session-driver.mjs', import.meta.url))
-    await ctx.loader.update('perse-cua', { config: { backend: 'mcp', command: process.execPath, args: [fixture, log, expired], indicator: false, bestExperience: false } })
-    await ctx.loader.await()
-    await waitFor(() => ctx.tools.get('mcp__cua__get_window_state'))
-    assert.ok(ctx.tools.get('mcp__cua__browser_navigate'))
-    await ctx.tools.get('mcp__cua__browser_navigate').execute({ url: 'https://example.test' })
-    assert.match(await readFile(log, 'utf8'), /browser_navigate/ )
-    assert.equal(ctx.tools.get('cua'), undefined)
-    const mcpGuidance = renderPrompt(await ctx.systemPrompt.assemble())
-    assert.match(mcpGuidance, /Available skill: cua-driver/ )
-    assert.doesNotMatch(mcpGuidance, /Do not load the external cua-driver skill for native cua/ )
     removeSkillCatalog()
-    assert.equal(ctx.get('computerUse'), undefined)
     await ctx.loader.update('perse-cua', { disabled: true })
     await ctx.loader.await()
     assert.equal(ctx.tools.get('mcp__cua__get_window_state'), undefined)
     assert.equal(ctx.tools.get('cua'), undefined)
-  } finally { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) }
+  } finally { await ctx.fiber.dispose() }
 })
 
 test('native entry reuses host registry, suspends on removal, and resumes on return', { skip: process.platform !== 'darwin' }, async () => {
@@ -173,7 +172,30 @@ test('native application access requires a task approval before fixture observat
     const app = await tool.execute({ method: 'getApp', params: { selector: 'Fixture' } }, execution(allowedAgent))
     const state = await tool.execute({ method: 'getState', params: { appHandle: app.appHandle, windowId: 7 } }, execution(allowedAgent))
     assert.equal(state.windowId, 7)
+    await assert.rejects(tool.execute({ method: 'saveScreenshot', params: { appHandle: app.appHandle, windowId: 7 } }, execution(allowedAgent)), /ARTIFACT_UNAVAILABLE/)
+    let bytes
+    const ref = { mediaType: 'image/png', width: 1, height: 1 }
+    ctx.provide('attachments', {
+      async saveImages(images) { bytes = images[0].data; return [ref] },
+      async readImage() { return { data: bytes, ref } },
+      async saveFile({ data }) { return { bytes: data.length } },
+      fileHostPath() { return '/fixture/screenshot.png' },
+    })
+    ctx.provide('fs', {
+      processPathFromHostPath: value => value,
+      resolve: async value => value,
+      processPath: value => value,
+      lstat: async () => ({ type: 'file' }),
+      stat: async () => ({ type: 'file', size: bytes.length }),
+      readBytes: async () => bytes,
+    })
+    const saved = await tool.execute({ method: 'saveScreenshot', params: { appHandle: app.appHandle, windowId: 7 } }, execution(allowedAgent))
+    assert.equal(saved.path, '/fixture/screenshot.png')
+    assert.equal(saved.modelReceivedImage, false)
+    assert.equal(Object.hasOwn(saved, 'data'), false)
     assert.equal((await events()).some(event => event.method === 'getState'), true)
+    await tool.execute({ method: 'getApp', params: { selector: 'Fixture', instance: 'new' } }, execution(allowedAgent))
+    assert.equal((await events()).some(event => event.method === 'getApp' && event.params.instance === 'new'), true)
   } finally { await ctx.fiber.dispose(); await closeHost(); await rm(root, { recursive: true, force: true }) }
 })
 
@@ -199,6 +221,7 @@ test('saved fixture consent is written to the loader entry and reused after rest
       ctx.baseUrl = pathToFileURL(home).href + '/'
       ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
       ctx.provide('profileContext', profile)
+      ctx.provide('profileToolAdmission', { version: 1, stage() {} })
       ctx.provide('appReady', { onReady: listener => { listener(); return () => {} } })
       ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: [answer] }] } } })
       for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess, ConfigEditor]) await ctx.plugin(plugin)
@@ -662,7 +685,9 @@ test('application discovery access failures clear only its frames and recover wi
       if (code !== 'NATIVE_TIMEOUT') assert.equal(first().capturedAt, undefined, code)
       if (code === 'NATIVE_CLOSED' || code === 'PERMISSION_DENIED') { await until(() => second()?.discoveryUnavailable); assert.equal(second().image, undefined) }
       else assert.ok(second()?.image, `other application lost its frame for ${code}`)
-      await rm(join(root, 'list-error')); await until(() => first()?.image && !first().discoveryUnavailable && second()?.image && !second().discoveryUnavailable)
+      await rm(join(root, 'list-error'))
+      if (code === 'PERMISSION_DENIED') assert.equal((await call('getCapabilities', {})).isError, false)
+      await until(() => first()?.image && !first().discoveryUnavailable && second()?.image && !second().discoveryUnavailable)
     }
     await ctx.loader.update('perse-cua', { config: { ...config, allowedApps: [] } }); await ctx.loader.await()
     await until(() => latest.length === 0)
@@ -1003,7 +1028,7 @@ test('slow preview subscriber receives the click frame before the newer capture'
     assert.deepEqual((await reader.next()).value.find(item => item.id.endsWith('/7')).point, { x: 0.25, y: 0.5 })
     assert.equal((await reader.next()).value.find(item => item.id.endsWith('/7')).point, undefined)
     assert.equal((await call('click', { appHandle: handle, windowId: 7, x: 250, y: 500, relative: true })).isError, false)
-    await ctx.emit('tools/result', { name: 'cua', agent, arguments: { method: 'listWindows', params: { appHandle: handle } } },
+    await ctx.emit('tools/result', { signal: new AbortController().signal, name: 'cua', agent, arguments: { method: 'listWindows', params: { appHandle: handle } } },
       { isError: false, value: [{ windowId: 7, title: 'Fixture', isOnScreen: false, bounds: { x: 10, y: 20, width: 400, height: 300 } }] })
     const hidden = (await reader.next()).value.find(item => item.id.endsWith('/7'))
     assert.equal(hidden.windowUnavailable, true); assert.equal(hidden.point, undefined)

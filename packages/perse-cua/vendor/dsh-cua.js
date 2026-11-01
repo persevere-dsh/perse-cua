@@ -1,4 +1,5 @@
 import { NativeRequestArbiter } from "./native-request-arbiter.js";
+import { saveScreenshotArtifact } from "./dsh-cua-screenshot-artifact.js";
 import { join } from "node:path";
 import { Buffer as Buffer$1 } from "node:buffer";
 import { tmpdir } from "node:os";
@@ -587,7 +588,7 @@ const Request = z.discriminatedUnion("method", [
 	operation("getCapabilities", {}),
 	operation("listApps", {}),
 	operation("findApps", { query: z.string().min(1, "Expected a non-empty search string").regex(/\S/, "Expected a non-empty search string") }),
-	operation("getApp", { selector: z.string().min(1) }),
+	operation("getApp", { selector: z.string().min(1), instance: z.enum(["existingOrLaunch", "new"]).optional() }),
 	operation("activate", app),
 	operation("show", {
 		...app,
@@ -701,7 +702,8 @@ const Request = z.discriminatedUnion("method", [
 			toY: relativePoint
 		}).strict()])
 	}).strict(),
-	operation("screenshot", window)
+	operation("screenshot", window),
+	operation("saveScreenshot", window)
 ]);
 z.object({
 	maxElements: z.number().int().min(1).max(1e4),
@@ -1090,7 +1092,14 @@ function installCua(ctx, config, backend) {
 					steps: config.dragSteps
 				} : params;
 			};
-			const requestNative = () => dispatchNative(execution.arbiter, client, "foreground", method, nativeParams, signal, execution.callId, !["getCapabilities", "listApps", "findApps", "listWindows"].includes(method));
+			const requestNative = () => dispatchNative(execution.arbiter, client, "foreground", method === "saveScreenshot" ? "screenshot" : method, nativeParams, signal, execution.callId, !["getCapabilities", "listApps", "findApps", "listWindows"].includes(method));
+			if (method === "saveScreenshot") {
+				const attachments = ctx.get("attachments"), fs = agent.ctx.get("fs");
+				if (!attachments || !fs) throw new NativeError("ARTIFACT_UNAVAILABLE", "Saving a screenshot requires attachment storage and task file access");
+				const screenshot = NativeScreenshotResult.parse(await requestNative());
+				if (screenshot.windowId !== request.params.windowId) throw new NativeError("NATIVE_PROTOCOL", "Screenshot artifact belongs to another window");
+				return saveScreenshotArtifact(attachments, fs, screenshot, signal);
+			}
 			if (method === "screenshot") {
 				const { attachments, target } = await screenshotStore(ctx, execution);
 				const screenshot = NativeScreenshotResult.parse(await requestNative());
@@ -1150,7 +1159,12 @@ function installCua(ctx, config, backend) {
 			description: backend.description,
 			parameters: {
 				...z.record(z.string(), z.json()).parse(z.toJSONSchema(Request)),
-				type: "object"
+				type: "object",
+				properties: {
+					method: { type: "string", enum: Request.options.map((operation) => operation.shape.method.value) },
+					params: { type: "object", description: "Operation parameters as a JSON object; use {} for an operation with no parameters." }
+				},
+				required: ["method", "params"]
 			},
 			output: {
 				schema: {},
@@ -1232,10 +1246,10 @@ function installCua(ctx, config, backend) {
 			text: () => ctx.get("ptcRuntime")?.programFormat !== "repl" ? backend.guidance : `${backend.guidance}
 
 Persistent PTC initialization:
-var { connectCua } = await import(${JSON.stringify(import.meta.resolve("@deepseek-ai/dsh-cua/bridge"))});
+var { connectCua } = await import(${JSON.stringify(new URL("./dsh-cua-bridge.js", import.meta.url).href)});
 var cua = connectCua(() => tools.cua, text => console.log(text));`
 		});
 	}, "dsh-cua.runtime");
 }
 //#endregion
-export { CuaConfig, installCua };
+export { CuaConfig, NativeError, installCua };

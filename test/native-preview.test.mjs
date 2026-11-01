@@ -2,6 +2,107 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { observeNative } from '../packages/perse-cua/lib/types/native-preview.js'
 
+const testSignal = new AbortController().signal
+
+test('turn end stops pending capture and resumes only when the next turn uses CUA', async () => {
+  const listeners = new Map(), windows = new Map(), pending = []
+  let lists = 0
+  const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+  const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+  const preview = observeNative(ctx, view, { intervalMs: 10 }), agent = { id: 'a' }, session = { id: 'a' }
+  const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  const event = (type, data) => listeners.get('session/event')(session, { type, data })
+  preview.hooks.onClient(agent, (_handle, id, signal) => new Promise((resolve, reject) => {
+    pending.push({ id, signal, resolve })
+    signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true })
+  }), async () => { lists++; return [] })
+  view.watch('a', true)
+  event('turn/start', { turn: 1 })
+  emit('getApp', {}, { appHandle: 'app', name: 'Editor' })
+  emit('getState', { appHandle: 'app', windowId: 1 }, { windowId: 1, windows: [{ windowId: 1, isOnScreen: true }] })
+  emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'YWJj', mimeType: 'image/png' })
+  emit('getState', { appHandle: 'app', windowId: 1 }, { windowId: 1, windows: [{ windowId: 1, isOnScreen: true }] })
+  const last = pending.at(-1)
+  event('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.equal(last.signal.aborted, true)
+  assert.equal(windows.get('a/app/1').activity, 'completed')
+  assert.equal(windows.get('a/app/1').image, 'data:image/png;base64,YWJj')
+  const before = lists
+  event('turn/start', { turn: 2 }); event('turn/end', { turn: 2, reason: { kind: 'completed' } })
+  await new Promise(resolve => setTimeout(resolve, 35))
+  assert.equal(lists, before)
+  event('turn/start', { turn: 3 })
+  emit('getState', { appHandle: 'app', windowId: 1 }, { windowId: 1, windows: [{ windowId: 1, isOnScreen: true }] })
+  assert.equal(windows.get('a/app/1').activity, undefined)
+  assert.equal(pending.at(-1).signal.aborted, false)
+  preview.close()
+})
+
+test('screen permission failure stops retries and a later operation can recover', async () => {
+  const listeners = new Map(), windows = new Map()
+  let allowed = false, captures = 0, lists = 0
+  const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+  const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+  const preview = observeNative(ctx, view, { intervalMs: 10 }), agent = { id: 'a' }
+  preview.hooks.onClient(agent, async (_handle, windowId) => {
+    captures++
+    if (!allowed) throw Object.assign(new Error('denied'), { code: 'PERMISSION_DENIED' })
+    return { windowId, data: 'YWJj', mimeType: 'image/png' }
+  }, async () => { lists++; return [] })
+  const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  view.watch('a', true)
+  emit('getApp', {}, { appHandle: 'app', name: 'Editor' })
+  emit('getState', { appHandle: 'app', windowId: 1 }, { windowId: 1, windows: [{ windowId: 1, isOnScreen: true }] })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(windows.get('a/app/1').previewIssue, 'screenRecording')
+  const before = { captures, lists }
+  await new Promise(resolve => setTimeout(resolve, 35))
+  assert.deepEqual({ captures, lists }, before)
+  allowed = true
+  emit('getState', { appHandle: 'app', windowId: 1 }, { windowId: 1, windows: [{ windowId: 1, isOnScreen: true }] })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(windows.get('a/app/1').previewIssue, undefined)
+  assert.equal(windows.get('a/app/1').image, 'data:image/png;base64,YWJj')
+  preview.close()
+})
+
+test('turn cancellation stops an in-flight preview before the turn closes', async () => {
+  const listeners = new Map(), windows = new Map(), pending = []
+  const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+  const view = { setDismissHandler() {}, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+  const preview = observeNative(ctx, view), agent = { id: 'a' }, turn = new AbortController()
+  preview.hooks.onClient(agent, (_handle, windowId, signal) => new Promise((resolve, reject) => {
+    pending.push({ windowId, signal, resolve })
+    signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true })
+  }))
+  const emit = (method, params, value) => listeners.get('tools/result')({ signal: turn.signal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  listeners.get('session/event')({ id: 'a' }, { type: 'turn/start', data: { turn: 1 } })
+  listeners.get('agent-loop/turn-signal')('a', turn.signal)
+  emit('getApp', {}, { appHandle: 'app', name: 'Editor' })
+  emit('getState', { appHandle: 'app', windowId: 1 }, { windowId: 1, windows: [{ windowId: 1, isOnScreen: true }] })
+  turn.abort()
+  assert.equal(pending[0].signal.aborted, true)
+  assert.equal(windows.get('a/app/1').activity, 'stopped')
+  preview.close()
+})
+
+test('a tool result arriving after an early turn cancellation cannot start preview capture', async () => {
+  const listeners = new Map(), windows = new Map(), turn = new AbortController()
+  const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+  const view = { setDismissHandler() {}, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+  const preview = observeNative(ctx, view), agent = { id: 'a' }
+  let captures = 0
+  preview.hooks.onClient(agent, async () => { captures++; return 'data:image/png;base64,AAAA' })
+  listeners.get('session/event')({ id: 'a' }, { type: 'turn/start', data: { turn: 1 } })
+  listeners.get('agent-loop/turn-signal')('a', turn.signal)
+  turn.abort()
+  listeners.get('tools/result')({ signal: turn.signal, name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: 'app', name: 'Editor' } })
+  listeners.get('tools/result')({ signal: turn.signal, name: 'cua', agent, arguments: { method: 'getState', params: { appHandle: 'app', windowId: 1 } } }, { isError: false, value: { windowId: 1 } })
+  assert.equal(captures, 0)
+  assert.equal(windows.size, 0)
+  preview.close()
+})
+
 test('native previews follow final outcomes, isolate windows and clear on disposal', () => {
   const listeners = new Map()
   const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
@@ -9,7 +110,7 @@ test('native previews follow final outcomes, isolate windows and clear on dispos
   const view = { setDismissHandler(fn) { this.dismiss = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
   const preview = observeNative(ctx, view)
   const agent = { id: 'a' }, other = { id: 'b' }
-  const emit = (owner, method, params, value, isError = false) => listeners.get('tools/result')({ name: 'cua', agent: owner, arguments: { method, params } }, isError ? { isError: true } : { isError: false, value })
+  const emit = (owner, method, params, value, isError = false) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent: owner, arguments: { method, params } }, isError ? { isError: true } : { isError: false, value })
   const app = owner => emit(owner, 'getApp', {}, { appHandle: 'app', name: 'Editor' })
   app(agent); app(other)
   const state = id => ({ windowId: id, windows: [{ windowId: id, title: `Window ${id}`, isOnScreen: true }] })
@@ -33,7 +134,7 @@ test('reselecting an application preserves existing and dismissed previews', () 
   const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
   const view = { setDismissHandler(fn) { this.dismiss = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
   const preview = observeNative(ctx, view), agent = { id: 'a' }
-  const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
   emit('getApp', {}, { appHandle: 'app', name: 'Fixture' })
   for (const windowId of [1, 2]) emit('getState', { appHandle: 'app', windowId }, { windowId, windows: [{ windowId, isOnScreen: true }] })
   view.dismiss('a/app/2'); view.remove('a/app/2')
@@ -51,7 +152,7 @@ test('a failed model screenshot refreshes the preview independently of the model
   const preview = observeNative(ctx, view), agent = { id: 'a' }
   let calls = 0
   preview.hooks.onClient(agent, async (_handle, windowId) => { calls++; return { windowId, data: 'YWJj', mimeType: 'image/png' } })
-  const emit = (method, params, value, isError = false) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, isError ? { isError: true } : { isError: false, value })
+  const emit = (method, params, value, isError = false) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, isError ? { isError: true } : { isError: false, value })
   emit('getApp', {}, { appHandle: 'app', name: 'Fixture' })
   emit('getState', { appHandle: 'app', windowId: 1 }, { windowId: 1, windows: [{ windowId: 1, isOnScreen: true }] })
   await new Promise(resolve => setImmediate(resolve))
@@ -72,7 +173,7 @@ test('preview cancels stale capture and never publishes it after disposal', asyn
   const view = { setDismissHandler(fn) { this.dismiss = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
   const preview = observeNative(ctx, view), agent = { id: 'a' }
   preview.hooks.onClient(agent, (_handle, id, signal) => new Promise((resolve, reject) => { pending.push({ id, signal, resolve, reject }) }))
-  const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
   emit('getApp', {}, { appHandle: 'app', name: 'Fixture' })
   emit('getState', { appHandle: 'app', windowId: 1 }, { windowId: 1, windows: [{ windowId: 1, title: 'One', isOnScreen: true }] })
   assert.equal(pending.length, 1)
@@ -97,7 +198,7 @@ test('element actions follow the snapshot window after another window is observe
   const view = { setDismissHandler() {}, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
   const preview = observeNative(ctx, view), agent = { id: 'a' }
   preview.hooks.onClient(agent, async (_handle, windowId) => { calls.push(windowId); return { windowId, data: 'YWJj', mimeType: 'image/png' } })
-  const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
   emit('getApp', {}, { appHandle: 'app', name: 'Fixture' })
   for (const windowId of [1, 2]) {
     emit('getState', { appHandle: 'app', windowId }, { windowId, snapshotId: `snapshot-${windowId}`, windows: [1, 2].map(id => ({ windowId: id, title: `${id}`, isOnScreen: true })) })
@@ -115,7 +216,7 @@ test('a dismissed window can reappear on a later operation', async () => {
   const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
   const view = { setDismissHandler(fn) { this.dismiss = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
   const preview = observeNative(ctx, view), agent = { id: 'a' }
-  const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
   emit('getApp', {}, { appHandle: 'app', name: 'Fixture' })
   emit('getState', { appHandle: 'app', windowId: 1 }, { windowId: 1, windows: [{ windowId: 1, title: 'One', isOnScreen: true }] })
   view.dismiss('a/app/1'); view.remove('a/app/1')
@@ -129,7 +230,7 @@ test('listing windows does not reopen a dismissed selected preview', () => {
   const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
   const view = { setDismissHandler(fn) { this.dismiss = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
   const preview = observeNative(ctx, view), agent = { id: 'a' }
-  const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
   emit('getApp', {}, { appHandle: 'app', name: 'Fixture' })
   emit('getState', { appHandle: 'app', windowId: 1 }, { windowId: 1, windows: [{ windowId: 1, title: 'One', isOnScreen: true }] })
   view.dismiss('a/app/1'); view.remove('a/app/1')
@@ -147,7 +248,7 @@ test('a denied preview capture clears an earlier image', async () => {
   const preview = observeNative(ctx, view), agent = { id: 'a' }
   let allowed = true
   preview.hooks.onClient(agent, async (_handle, windowId) => { if (!allowed) throw new Error('access revoked'); return { windowId, data: 'YWJj', mimeType: 'image/png' } })
-  const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
   emit('getApp', {}, { appHandle: 'app', name: 'Fixture' })
   emit('getState', { appHandle: 'app', windowId: 1 }, { windowId: 1, windows: [{ windowId: 1, isOnScreen: true }] })
   await new Promise(resolve => setImmediate(resolve)); assert.ok(windows.get('a/app/1').image)
@@ -165,7 +266,7 @@ test('revoking an application clears all windows on the invalidated connection',
   const view = { setDismissHandler() {}, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
   const preview = observeNative(ctx, view), agent = { id: 'a' }
   preview.hooks.onClient(agent, (_handle, windowId, signal) => new Promise(resolve => requests.push({ windowId, signal, resolve })))
-  const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
   emit('getApp', {}, { appHandle: 'app', name: 'Fixture' })
   emit('getState', { appHandle: 'app', windowId: 1 }, { windowId: 1, windows: [{ windowId: 1, isOnScreen: true }] })
   emit('getApp', {}, { appHandle: 'second', name: 'Second' })
@@ -186,7 +287,7 @@ test('a capture cancelled for a new native operation retains the last frame', as
   const view = { setDismissHandler() {}, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
   const preview = observeNative(ctx, view), agent = { id: 'a' }
   preview.hooks.onClient(agent, (_handle, _window, signal) => new Promise((resolve, reject) => pending.push({ signal, resolve, reject })))
-  const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
   emit('getApp', {}, { appHandle: 'app', name: 'Fixture' })
   emit('getState', { appHandle: 'app', windowId: 1 }, { windowId: 1, windows: [{ windowId: 1, isOnScreen: true }] })
   pending[0].resolve({ windowId: 1, data: 'YWJj', mimeType: 'image/png' })
@@ -215,7 +316,7 @@ test('a cancelled capture retries after operations settle and publishes the late
     if (calls === 2) throw Object.assign(new Error('operation still active'), { code: 'NATIVE_BUSY' })
     return { windowId: 1, data: 'bmV3', mimeType: 'image/png' }
   })
-  const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
   emit('getApp', {}, { appHandle: 'app', name: 'Fixture' })
   emit('getState', { appHandle: 'app', windowId: 1 }, { windowId: 1, windows: [{ windowId: 1, isOnScreen: true }] })
   for (let i = 0; i < 100 && !windows.get('a/app/1')?.image; i++) await new Promise(resolve => setTimeout(resolve, 10))
@@ -231,7 +332,7 @@ test('click position appears only on the matching model screenshot', () => {
   const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
   const view = { setDismissHandler() {}, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
   const preview = observeNative(ctx, view), agent = { id: 'a' }
-  const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
   emit('getApp', {}, { appHandle: 'app', name: 'Fixture' })
   emit('getState', { appHandle: 'app', windowId: 1 }, { windowId: 1, snapshotId: 'snapshot', windows: [{ windowId: 1, isOnScreen: true }] })
   emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'YWJj', mimeType: 'image/png', pixelWidth: 100, pixelHeight: 200 })
@@ -251,7 +352,7 @@ test('click marker is omitted when the preview no longer matches the model image
   const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
   const view = { setDismissHandler() {}, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
   const preview = observeNative(ctx, view), agent = { id: 'a' }
-  const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
   emit('getApp', {}, { appHandle: 'app', name: 'Fixture' })
   emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'YWJj', mimeType: 'image/png', pixelWidth: 100, pixelHeight: 200 })
   preview.hooks.onClient(agent, async () => ({ windowId: 1, data: 'ZGlmZmVyZW50', mimeType: 'image/png' }))
@@ -267,7 +368,7 @@ test('relative click marker requires a preview captured at the observed window s
   const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
   const view = { setDismissHandler() {}, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
   const preview = observeNative(ctx, view), agent = { id: 'a' }
-  const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
   emit('getApp', {}, { appHandle: 'app', name: 'Fixture' })
   preview.hooks.onClient(agent, async () => ({ windowId: 1, data: 'YWJj', mimeType: 'image/png', bounds: { width: 400, height: 300 } }))
   emit('getState', { appHandle: 'app', windowId: 1 }, { windowId: 1, windows: [{ windowId: 1, bounds: { width: 400, height: 300 }, isOnScreen: true }] })
@@ -291,7 +392,7 @@ test('subscribed native previews discover and refresh windows without model call
     { windowId: 2, title: 'Two', bounds: { width: 200, height: 100 }, isOnScreen: true, onCurrentSpace: true },
     { windowId: 3, title: 'Hidden', bounds: { width: 100, height: 100 }, isOnScreen: false, onCurrentSpace: true },
   ])
-  listeners.get('tools/result')({ name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: 'app', name: 'Fixture' } })
+  listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: 'app', name: 'Fixture' } })
   view.watch('auto', true)
   for (let i = 0; i < 100 && calls.length < 3; i++) await new Promise(resolve => setTimeout(resolve, 5))
   assert.deepEqual(calls.slice(0, 3), [1, 2, 1])
@@ -312,7 +413,7 @@ test('revocation cancels an in-flight background capture and rejects its late fr
   const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
   const preview = observeNative(ctx, view, { intervalMs: 10 }), agent = { id: 'auto' }
   preview.hooks.onClient(agent, (_handle, id, signal) => new Promise(resolve => { pending = { id, signal, resolve } }), async () => [{ windowId: 1, title: 'One', bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }])
-  listeners.get('tools/result')({ name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: 'app', name: 'Fixture' } })
+  listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: 'app', name: 'Fixture' } })
   view.watch('auto', true)
   for (let i = 0; i < 100 && !pending; i++) await new Promise(resolve => setTimeout(resolve, 5))
   assert.ok(pending)
@@ -332,7 +433,7 @@ test('transient absence retains automatic cards, then removes only automatic car
   const row = windowId => ({ windowId, title: `Window ${windowId}`, bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true })
   rows = [row(1), row(2)]
   preview.hooks.onClient(agent, async (_handle, windowId) => ({ windowId, data: 'YWJj', mimeType: 'image/png' }), async () => { scans++; return rows })
-  const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
   emit('getApp', {}, { appHandle: 'app', name: 'Fixture' }); view.watch('auto', true)
   while (scans < 2) await new Promise(resolve => setTimeout(resolve, 5))
   emit('getState', { appHandle: 'app', windowId: 1 }, { windowId: 1, windows: rows })
@@ -352,7 +453,7 @@ test('old helpers reject display-only discovery visibly without falling back or 
   const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
   const preview = observeNative(ctx, view, { intervalMs: 10 }), agent = { id: 'auto' }
   preview.hooks.onClient(agent, async () => { throw new Error('unexpected capture') }, async () => { scans++; throw Object.assign(new Error('unknown parameter'), { code: 'INVALID_ARGUMENT' }) })
-  listeners.get('tools/result')({ name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: 'app', name: 'Fixture' } })
+  listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: 'app', name: 'Fixture' } })
   view.watch('auto', true)
   for (let i = 0; i < 100 && !scans; i++) await new Promise(resolve => setTimeout(resolve, 5))
   await new Promise(resolve => setTimeout(resolve, 30))
@@ -367,7 +468,7 @@ test('background discovery never runs when application selection is denied', asy
   const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put() { assert.fail('denied application produced a card') }, remove() {} }
   const preview = observeNative(ctx, view, { intervalMs: 10 }), agent = { id: 'auto' }
   preview.hooks.onClient(agent, async () => { throw new Error('unexpected capture') }, async () => { scans++; return [] })
-  listeners.get('tools/result')({ name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: true })
+  listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: true })
   view.watch('auto', true)
   await new Promise(resolve => setTimeout(resolve, 40))
   assert.equal(scans, 0)
@@ -387,7 +488,7 @@ test('three discovered windows refresh after resize and content changes until di
     calls.push({ windowId, width, height, revision })
     return { windowId, data: Buffer.from(`${windowId}:${width}x${height}:${revision}`).toString('base64'), mimeType: 'image/png', bounds: { width, height } }
   }, async () => rows())
-  listeners.get('tools/result')({ name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: 'app', name: 'Fixture' } })
+  listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: 'app', name: 'Fixture' } })
   view.watch('auto', true)
   const waitFor = async predicate => { for (let i = 0; i < 200 && !predicate(); i++) await new Promise(resolve => setTimeout(resolve, 5)); assert.ok(predicate()) }
   await waitFor(() => windows.size === 3 && [...windows.values()].every(item => item.image))
@@ -417,7 +518,7 @@ test('continuous refresh recovers visibility and superseded slow captures withou
     if (revision === 2 && !slow) await new Promise(resolve => { slow = { signal, resolve } })
     return { windowId, data: Buffer.from(value).toString('base64'), mimeType: 'image/png', bounds: { width, height: 200 } }
   }, async () => visible ? [{ windowId: 1, title: 'Fixture', bounds: { width, height: 200 }, isOnScreen: true, onCurrentSpace: true }] : [])
-  const emit = (method, params, value) => { modelCalls++; listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value }) }
+  const emit = (method, params, value) => { modelCalls++; listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value }) }
   emit('getApp', {}, { appHandle: 'app', name: 'Fixture' }); view.watch(agent.id, true)
   const image = value => `data:image/png;base64,${Buffer.from(value).toString('base64')}`
   await waitFor(() => windows.get('continuous/app/1')?.image === image('0:300'))
@@ -455,7 +556,7 @@ test('display-only discovery keeps tiny windows, ignores transient and hidden ro
     const tag = `${owner.id}/${handle}/${windowId}`; captures.push(tag)
     return { windowId, data: Buffer.from(tag).toString('base64'), mimeType: 'image/png' }
   }
-  const app = (agent, handle, name) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: handle, name } })
+  const app = (agent, handle, name) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: handle, name } })
   const until = async predicate => { for (let i = 0; i < 200 && !predicate(); i++) await new Promise(resolve => setTimeout(resolve, 5)); assert.ok(predicate(), 'discovery timed out') }
   try {
     preview.hooks.onClient(a, capture(a), list(a)); preview.hooks.onClient(b, capture(b), list(b))
@@ -485,7 +586,7 @@ test('discovery failure is isolated to its app and clears after recovery', async
     if (failure && handle === 'first') throw Object.assign(new Error('unavailable'), { code: 'NATIVE_ERROR' })
     return (handle === 'first' ? [1, 2] : [1]).map(windowId => ({ windowId, title: `${handle}-${windowId}`, bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }))
   })
-  const emitApp = handle => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: handle, name: handle } })
+  const emitApp = handle => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: handle, name: handle } })
   const until = async predicate => { for (let i = 0; i < 200 && !predicate(); i++) await new Promise(resolve => setTimeout(resolve, 5)); assert.ok(predicate(), 'discovery timed out') }
   try {
     emitApp('first'); emitApp('second'); view.watch('a', true)
@@ -508,7 +609,7 @@ test('cancelled discovery after revocation cannot publish a failure or resume', 
   const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
   const preview = observeNative(ctx, view, { intervalMs: 10 }), agent = { id: 'a' }
   preview.hooks.onClient(agent, async () => { throw new Error('unexpected capture') }, (_handle, signal) => new Promise((_resolve, reject) => { pending = { signal, reject } }))
-  listeners.get('tools/result')({ name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: 'app', name: 'Fixture' } })
+  listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: 'app', name: 'Fixture' } })
   try {
     view.watch('a', true)
     for (let i = 0; i < 100 && !pending; i++) await new Promise(resolve => setTimeout(resolve, 5))
@@ -525,7 +626,7 @@ test('unrelated reads do not prevent automatic discovery and refresh', async () 
   const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
   const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
   const preview = observeNative(ctx, view, { intervalMs: 20 }), agent = { id: 'a' }
-  const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
   preview.hooks.onClient(agent, async (_handle, windowId) => ({ windowId, data: Buffer.from(String(++captures)).toString('base64'), mimeType: 'image/png' }), async () => { scans++; return [{ windowId: 1, title: 'One', bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }] })
   emit('getApp', {}, { appHandle: 'app', name: 'Fixture' }); view.watch('a', true)
   const timer = setInterval(() => emit('getCapabilities', {}, {}), 5)
@@ -541,7 +642,7 @@ test('a targeted operation cancels an in-flight background frame', async () => {
   const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
   const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
   const preview = observeNative(ctx, view, { intervalMs: 10 }), agent = { id: 'a' }
-  const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
   preview.hooks.onClient(agent, (_handle, windowId, signal) => new Promise(resolve => { pending = { windowId, signal, resolve } }), async () => [{ windowId: 1, title: 'One', bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }])
   try {
     emit('getApp', {}, { appHandle: 'app', name: 'Fixture' }); view.watch('a', true)
@@ -567,7 +668,7 @@ test('discovery without windows shows one status until recovery', async () => {
   })
   const until = async predicate => { for (let i = 0; i < 200 && !predicate(); i++) await new Promise(resolve => setTimeout(resolve, 5)); assert.ok(predicate(), 'discovery timed out') }
   try {
-    listeners.get('tools/result')({ name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: 'app', name: 'Fixture' } })
+    listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: 'app', name: 'Fixture' } })
     view.watch('a', true)
     await until(() => scans >= 3)
     assert.equal(statusPuts, 1)
@@ -589,7 +690,7 @@ test('background screenshot timeout keeps the last frame with a warning until re
     if (mode === 'pending') return new Promise((_resolve, reject) => { rejectPending = reject })
     return { windowId, data: mode === 'recovered' ? 'bmV3' : 'b2xk', mimeType: 'image/png' }
   }, async () => [{ windowId: 1, title: 'One', bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }])
-  listeners.get('tools/result')({ name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: 'app', name: 'Fixture' } })
+  listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: 'app', name: 'Fixture' } })
   view.watch('auto', true)
   for (let i = 0; i < 200 && !windows.get('auto/app/1')?.image; i++) await new Promise(resolve => setTimeout(resolve, 5))
   const initial = windows.get('auto/app/1'); assert.equal(initial.image, 'data:image/png;base64,b2xk')
@@ -617,7 +718,7 @@ test('screenshot permission denial and lost application handles clear the retain
       if (failure) throw Object.assign(new Error('unavailable'), { code: failure })
       return { windowId, data: 'b2xk', mimeType: 'image/png' }
     }, async () => [{ windowId: 1, title: 'One', bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }])
-    listeners.get('tools/result')({ name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: 'app', name: 'Fixture' } })
+    listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: 'app', name: 'Fixture' } })
     view.watch('auto', true)
     for (let i = 0; i < 200 && !windows.get('auto/app/1')?.image; i++) await new Promise(resolve => setTimeout(resolve, 5))
     assert.ok(windows.get('auto/app/1')?.image, code); failure = code
@@ -635,7 +736,7 @@ test('connection failures during window discovery clear every application on tha
     const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
     const preview = observeNative(ctx, view, { intervalMs: 10 }), agent = { id: 'auto' }
     preview.hooks.onClient(agent, async () => { throw new Error('unexpected screenshot') }, async () => { failed = true; throw Object.assign(new Error('connection lost'), { code }) })
-    const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+    const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
     for (const appHandle of ['first', 'second']) {
       emit('getApp', {}, { appHandle, name: appHandle })
       emit('screenshot', { appHandle, windowId: 1 }, { windowId: 1, data: 'YWJj', mimeType: 'image/png' })
@@ -657,7 +758,7 @@ test('action-triggered capture distinguishes timeout from connection-wide permis
   const view = { setDismissHandler() {}, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
   const preview = observeNative(ctx, view), agent = { id: 'auto' }
   preview.hooks.onClient(agent, async () => { throw Object.assign(new Error('capture failed'), { code: failure }) })
-  const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
   for (const appHandle of ['first', 'second']) {
     emit('getApp', {}, { appHandle, name: appHandle })
     emit('screenshot', { appHandle, windowId: 1 }, { windowId: 1, data: 'YWJj', mimeType: 'image/png' })
@@ -677,7 +778,7 @@ test('another agent disposal or tool result does not interrupt an active preview
     const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
     const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
     const preview = observeNative(ctx, view, { intervalMs: 10 }), a = { id: 'a' }, b = { id: 'b' }
-    const emit = (agent, method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+    const emit = (agent, method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
     emit(a, 'getApp', {}, { appHandle: 'app-a', name: 'A' })
     emit(b, 'getApp', {}, { appHandle: 'app-b', name: 'B' })
     emit(b, 'screenshot', { appHandle: 'app-b', windowId: 1 }, { windowId: 1, data: 'b2xk', mimeType: 'image/png' })
@@ -706,7 +807,7 @@ test('candidate eligibility is rechecked after another agent list completes', as
     const view = { setDismissHandler(fn) { this.dismiss = fn }, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
     const preview = observeNative(ctx, view, { intervalMs: 10 }), b = { id: 'b' }, a = { id: 'a' }
     try {
-    const emit = (agent, method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+    const emit = (agent, method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
     emit(b, 'getApp', {}, { appHandle: 'b-app', name: 'B' }); emit(a, 'getApp', {}, { appHandle: 'a-app', name: 'A' })
     emit(b, 'screenshot', { appHandle: 'b-app', windowId: 1 }, { windowId: 1, data: 'b2xk', mimeType: 'image/png' })
     const attachB = () => preview.hooks.onClient(b, async (_handle, windowId) => { shots++; shotScans.push(scansB); return { windowId, data: 'bmV3', mimeType: 'image/png' } }, async () => { scansB++; return [{ windowId: 1, title: 'B', bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }] })
@@ -747,7 +848,7 @@ test('late capture errors cannot clear a newer watcher, application, window or c
     const view = { setDismissHandler(fn) { this.dismiss = fn }, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
     const preview = observeNative(ctx, view, { intervalMs: 10 }), agent = { id: 'a' }
     try {
-      const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+      const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
       const list = async () => [{ windowId: 1, title: 'Window', bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }]
       emit('getApp', {}, { appHandle: 'app', name: 'A' })
       emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'b2xk', mimeType: 'image/png' })
@@ -776,7 +877,7 @@ test('a replaced client never consumes old discovery success or failure', async 
     const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
     const preview = observeNative(ctx, view, { intervalMs: 20 }), agent = { id: 'a' }
     try {
-      const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+      const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
       const rows = [{ windowId: 1, title: 'Window', bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }]
       emit('getApp', {}, { appHandle: 'app', name: 'A' })
       emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'b2xk', mimeType: 'image/png' })
@@ -804,7 +905,7 @@ test('old discovery replies cannot alter a resubscribed or reauthorized applicat
     const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
     const preview = observeNative(ctx, view, { intervalMs: 20 }), agent = { id: 'a' }
     try {
-      const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+      const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
       const rows = [{ windowId: 1, title: 'New', bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }]
       emit('getApp', {}, { appHandle: 'app', name: 'A' })
       emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'b2xk', mimeType: 'image/png' })
@@ -837,7 +938,7 @@ test('list observations preserve active captures only while window state is unch
     const preview = observeNative(ctx, view, { intervalMs: 10 }), agent = { id: 'a' }
     try {
       const row = { windowId: 1, title: 'One', bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }
-      const emit = (method, params, value, isError = false) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, isError ? { isError: true, error: { message: 'PERMISSION_DENIED: fixture denial' } } : { isError: false, value })
+      const emit = (method, params, value, isError = false) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, isError ? { isError: true, error: { message: 'PERMISSION_DENIED: fixture denial' } } : { isError: false, value })
       emit('getApp', {}, { appHandle: 'app', name: 'A' })
       emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'b2xk', mimeType: 'image/png' })
       preview.hooks.onClient(agent, (_handle, _windowId, signal) => new Promise(resolve => { pending = { signal, resolve } }), async () => [row])
@@ -862,7 +963,7 @@ test('screenshot dimensions establish the first list baseline and invalidate old
   const view = { setDismissHandler() {}, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
   const preview = observeNative(ctx, view), agent = { id: 'a' }
   try {
-    const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+    const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
     emit('getApp', {}, { appHandle: 'app', name: 'A' })
     emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'b2xk', mimeType: 'image/png', pixelWidth: 100, pixelHeight: 100, bounds: { width: 100, height: 100 } })
     emit('click', { appHandle: 'app', windowId: 1, x: 25, y: 25 }, { dispatched: true })
@@ -881,7 +982,7 @@ test('a cancelled old frame cannot replace the size from a newer screenshot', as
   const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
   const preview = observeNative(ctx, view, { intervalMs: 10 }), agent = { id: 'a' }
   try {
-    const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+    const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
     const row = { windowId: 1, title: 'One', bounds: { width: 100, height: 100 }, isOnScreen: true }
     emit('getApp', {}, { appHandle: 'app', name: 'A' })
     emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'b2xk', mimeType: 'image/png', bounds: row.bounds })
@@ -907,7 +1008,7 @@ test('window changes cancel action-triggered captures and ignore late frames', a
     const preview = observeNative(ctx, view), agent = { id: 'a' }
     try {
       const row = { windowId: 1, title: 'One', bounds: { width: 100, height: 100 }, isOnScreen: true }
-      const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+      const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
       emit('getApp', {}, { appHandle: 'app', name: 'A' })
       emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'b2xk', mimeType: 'image/png', bounds: row.bounds })
       preview.hooks.onClient(agent, (_handle, _id, signal) => new Promise(resolve => { pending = { signal, resolve } }))
@@ -931,7 +1032,7 @@ test('automatic previews rotate by window identity when discovery order changes'
   const preview = observeNative(ctx, view, { intervalMs: 10 }), agent = { id: 'a' }
   try {
     const row = windowId => ({ windowId, title: `Window ${windowId}`, bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true })
-    const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+    const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
     emit('getApp', {}, { appHandle: 'app', name: 'Fixture' })
     for (const windowId of [1, 2]) emit('screenshot', { appHandle: 'app', windowId }, { windowId, data: 'YWJj', mimeType: 'image/png' })
     let ids = [1, 2]
@@ -959,7 +1060,7 @@ test('a failing capture cannot starve another application and revoked sessions s
   const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
   const preview = observeNative(ctx, view, { intervalMs: 10 }), a = { id: 'a' }, b = { id: 'b' }
   try {
-    const emit = (agent, method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+    const emit = (agent, method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
     const row = { windowId: 1, title: 'Window', bounds: { width: 100, height: 100 }, isOnScreen: true, onCurrentSpace: true }
     for (const agent of [a, b]) {
       emit(agent, 'getApp', {}, { appHandle: 'app', name: agent.id })
@@ -989,7 +1090,7 @@ test('size bookkeeping retires transient windows while retaining pinned-window r
   const preview = instrumentedPreview(ctx, view, { intervalMs: 5 }), agent = { id: 'a' }
   try {
     const row = (windowId, width) => ({ windowId, title: `Window ${windowId}`, bounds: { width, height: 100 }, isOnScreen: true, onCurrentSpace: true })
-    const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+    const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
     const until = async check => { for (let i = 0; i < 300 && !check(); i++) await new Promise(resolve => setTimeout(resolve, 2)); assert.ok(check()) }
     emit('getApp', {}, { appHandle: 'app', name: 'Fixture' })
     preview.hooks.onClient(agent, (_handle, windowId) => new Promise(resolve => { pending = { windowId, resolve } }), async () => { scans++; return rows })
@@ -1026,7 +1127,7 @@ test('background window disappearance clears pending click frames while retainin
   const listeners = new Map(), ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
   const view = new PreviewService(new Context()), preview = observeNative(ctx, view, { intervalMs: 40 }), agent = { id: 'gone' }
   let scans = 0, rows = [1, 2].map(windowId => ({ windowId, title: `Window ${windowId}`, bounds: { width: 100, height: 100 }, isOnScreen: true }))
-  const emit = (method, params, value) => listeners.get('tools/result')({ name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
   preview.hooks.onClient(agent, async (_handle, windowId) => ({ windowId, data: 'YWJj', mimeType: 'image/png', bounds: { width: 100, height: 100 } }), async () => { scans++; return rows })
   emit('getApp', {}, { appHandle: 'app', name: 'Fixture' })
   const controller = new AbortController(), reader = view.watch(agent.id, controller.signal)[Symbol.asyncIterator]()

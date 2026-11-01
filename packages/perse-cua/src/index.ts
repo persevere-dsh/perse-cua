@@ -1,5 +1,5 @@
 /**
- * Desktop automation for DSH. On macOS the default provider registers the
+ * Desktop automation for DSH. On macOS the provider registers the
  * native `cua` tool. The MCP backend connects to an external cua-driver,
  * curates its tools, and projects results to the harness.
  *
@@ -30,7 +30,7 @@ export const inject = ['tools']
 
 /** Plugin configuration, read from the loader row's `config` block. */
 export interface Config extends Partial<NativeConfig> {
-  /** Select the native macOS provider or the external MCP driver explicitly. */
+  /** Select the native macOS provider or the external MCP driver on other platforms. */
   backend?: 'native' | 'mcp'
   /** Provide the preview service without starting a driver or registering its tools. */
   presenterOnly?: boolean
@@ -137,13 +137,26 @@ function definitionBytes(tool: McpTool, condense: boolean): number {
  * @returns a disposer that unregisters every tool and stops the driver.
  */
 export const apply = (ctx: Context & { tools: { register: (definition: unknown) => () => void }; logger?: { info: (message: string) => void } }, config: Config = {}): (() => void) => {
+  if (process.platform === 'darwin' && config.presenterOnly === true && ctx.get('profileContext') !== undefined) {
+    throw new Error('The macOS CUA profile entry cannot use presenterOnly; use the perse-cua/presenter entrypoint for a read-only presenter')
+  }
   const mcpFields = ['command', 'args', 'env', 'serverName', 'allow', 'deny', 'condenseDescriptions', 'trimMenuTrees', 'bestExperience', 'bestExperienceSession', 'indicator', 'indicatorStateFile', 'drivingPanel', 'requestTimeoutMs', 'startupTimeoutMs'] as const
   const hasMcpFields = mcpFields.some(key => config[key] !== undefined)
   if (config.presenterOnly !== true && config.backend === 'native' && process.platform !== 'darwin') throw new Error('perse-cua native requires macOS 14 or later')
+  if (config.presenterOnly !== true && process.platform === 'darwin' && config.backend === 'mcp') {
+    throw new Error('perse-cua on macOS requires the native backend; remove backend: mcp and MCP driver settings')
+  }
   if (config.presenterOnly !== true && process.platform === 'darwin' && config.backend === undefined && hasMcpFields) {
-    throw new Error('perse-cua MCP driver settings require backend: mcp explicitly on macOS')
+    throw new Error('perse-cua on macOS requires the native backend; remove MCP driver settings')
   }
   if (config.presenterOnly !== true && config.backend === 'native' && hasMcpFields) throw new Error('perse-cua native backend cannot use MCP driver settings')
+  if (config.presenterOnly !== true && process.platform === 'darwin') {
+    const service = ctx.get.bind(ctx) as (name: string) => unknown
+    const admission = service('profileToolAdmission')
+    if (service('profileContext') !== undefined && (admission === null || typeof admission !== 'object' || !('version' in admission) || admission.version !== 1)) {
+      throw new Error('perse-cua requires DSH profile tool admission version 1; update the host before enabling CUA')
+    }
+  }
   const view = new PreviewService(ctx)
   if (config.presenterOnly === true) return () => view.close()
   if (config.backend === 'native' || (process.platform === 'darwin' && config.backend === undefined)) {

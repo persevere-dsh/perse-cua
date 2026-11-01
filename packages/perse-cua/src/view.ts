@@ -11,6 +11,10 @@ export interface PreviewWindow {
   capturedAt?: number
   failed?: boolean
   working?: boolean
+  /** The turn that last used this window has ended. */
+  activity?: 'completed' | 'stopped' | 'failed'
+  /** Reason a background preview cannot currently update. */
+  previewIssue?: 'accessibility' | 'screenRecording' | 'connection' | 'window' | 'busy'
   previewUnavailable?: boolean
   /** Window discovery failed for the application. */
   discoveryUnavailable?: boolean
