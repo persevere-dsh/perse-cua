@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Opt-in isolated macOS helper/fixture test; never shares the user's helper socket."""
 import argparse
+import base64
 import fcntl
 import hashlib
 import json
@@ -113,9 +114,13 @@ def main():
                         help='Stable isolated fixture directory (default: ~/Library/Caches/perse-cua-hover-fixture)')
     parser.add_argument('--prepare-only', action='store_true', help='Build and stage identities without starting any GUI or helper')
     parser.add_argument('--allow-desktop-change', action='store_true', help='Explicitly allow a background test window and cursor feedback to change the desktop')
+    parser.add_argument('--evidence-file', type=Path, help='Write a new JSONL file with isolated identities, requests, replies and fixture states')
+    parser.add_argument('--capture-previews', action='store_true', help='Save display-only fixture window PNGs beside --evidence-file; excludes the independent cursor panel')
     args = parser.parse_args()
     if not args.prepare_only and not args.allow_desktop_change:
         parser.error('Cannot guarantee a real fixture leaves the desktop unchanged; explicit --allow-desktop-change is required')
+    if args.capture_previews and not args.evidence_file:
+        parser.error('--capture-previews requires --evidence-file')
     asset_root = prepare_root(args.test_root)
     lock = os.fdopen(os.open(asset_root / '.run.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600), 'r+')
     try:
@@ -128,6 +133,13 @@ def main():
     if args.prepare_only:
         print(f'Prepared helper {helper} (SHA-256 {key}) and fixture {executable.parent.parent.parent}; no processes started')
         return
+    evidence = args.evidence_file.open('x') if args.evidence_file else None
+    def record(event, **values):
+        if evidence:
+            evidence.write(json.dumps({'event': event, 'monotonic': time.monotonic(), **values}) + '\n')
+            evidence.flush()
+    record('prepared', helper=str(helper), helperSha256=key, fixture=str(executable),
+           fixtureSha256=hashlib.sha256(executable.read_bytes()).hexdigest())
     # Every run uses its own short socket directory, regardless of helper digest.
     with tempfile.TemporaryDirectory(prefix='ph-', dir='/tmp') as temp:
         root = Path(temp)
@@ -135,15 +147,11 @@ def main():
         state_path = root / 'state.json'
         fixture = helper_process = connection = stream = None
         try:
-            fixture = subprocess.Popen([str(executable), str(state_path)], stdin=subprocess.DEVNULL)
-            wait_for(state_path.exists, 'fixture startup')
-            initial = json.loads(state_path.read_text())
-            if initial['cursorChanged'] or initial['frontChanged']:
-                raise RuntimeError('Desktop changed during fixture startup; retry only when idle')
             helper_process = subprocess.Popen([str(helper), '--serve', '--runtime-key', key,
                 '--runtime-directory', str(runtime), '--startup-timeout-ms', '10000'], stdin=subprocess.DEVNULL)
             socket_path = runtime / f'{key}.sock'
             wait_for(socket_path.exists, 'isolated helper socket')
+            record('helper', pid=helper_process.pid, socket=str(socket_path), runtimeKey=key)
             connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             connection.settimeout(15)
             connection.connect(str(socket_path))
@@ -159,18 +167,31 @@ def main():
                 'maxRequestBytes': 1048576, 'maxResponseBytes': 33554432, 'axTimeoutMs': 3000,
                 'textEventIntervalMs': 0.25, 'screenshotTimeoutMs': 5000, 'timeoutMs': 15000, 'graceMs': 1000}})
             ready = read()
-            assert ready.get('type') == 'ready' and ready.get('runtimeKey') == key, ready
+            record('ready', value=ready)
+            assert ready.get('type') == 'ready' and ready.get('runtimeKey') == key and ready.get('pid') == helper_process.pid, ready
             seq = 0
             def call(method, params, expected_error=None):
                 nonlocal seq
                 seq += 1
-                send({'id': str(seq), 'method': method, 'params': params})
+                request = {'id': str(seq), 'method': method, 'params': params}
+                record('request', value=request)
+                send(request)
                 while True:
                     response = read()
                     if response.get('type') == 'diagnostic':
                         continue
                     break
                 assert response.get('id') == str(seq), response
+                recorded = response
+                if isinstance(response.get('result'), dict) and isinstance(response['result'].get('data'), str):
+                    result = dict(response['result'])
+                    image = base64.b64decode(result.pop('data'), validate=True)
+                    result['imageSha256'] = hashlib.sha256(image).hexdigest()
+                    result['imageBytes'] = len(image)
+                    recorded = {**response, 'result': result}
+                record('response', value=recorded)
+                if state_path.exists():
+                    record('fixture-state', requestId=str(seq), value=json.loads(state_path.read_text()))
                 if expected_error:
                     assert response.get('error', {}).get('code') == expected_error, response
                     return
@@ -180,29 +201,61 @@ def main():
             capabilities = call('getCapabilities', {})
             if not capabilities['permissions']['accessibility']:
                 raise RuntimeError('Accessibility permission is required for the isolated helper')
+            fixture = subprocess.Popen([str(executable), str(state_path)], stdin=subprocess.DEVNULL)
+            record('fixture', pid=fixture.pid)
+            def fixture_started():
+                if fixture.poll() is not None:
+                    raise RuntimeError(f'Fixture exited before readiness (exit {fixture.returncode}); see its diagnostic')
+                return state_path.exists()
+            wait_for(fixture_started, 'fixture startup')
+            initial = json.loads(state_path.read_text())
+            record('fixture-initial', value=initial)
+            if initial['cursorChanged'] or initial['frontChanged']:
+                raise RuntimeError('Desktop changed during fixture startup; retry only when idle')
             owner = {'appHandle': call('getApp', {'selector': str(fixture.pid)})['appHandle']}
             window = wait_for(lambda: next((w for w in call('listWindows', owner)
                 if w['title'] == 'Perse isolated hover fixture'), None), 'fixture window')
             scope = {**owner, 'windowId': window['windowId'], 'maxDepth': 20, 'maxElements': 100}
+            def capture(label):
+                if not args.capture_previews:
+                    return
+                result = call('screenshot', {**owner, 'windowId': window['windowId'], 'displayOnly': True})
+                image = base64.b64decode(result['data'], validate=True)
+                path = args.evidence_file.with_name(f'{args.evidence_file.stem}-{label}.png')
+                with path.open('xb') as output:
+                    output.write(image)
+                record('preview', requestId=str(seq), windowId=window['windowId'], path=str(path),
+                       sha256=hashlib.sha256(image).hexdigest(), excludesCursorPanel=True,
+                       fixtureState=json.loads(state_path.read_text()))
             def target(label):
                 observed = call('getState', scope)
                 matches = [item for item in observed['elements'] if item.get('description') == label or item.get('title') == label]
                 assert len(matches) == 1, (label, observed['tree'])
                 return {**owner, 'snapshotId': observed['snapshotId'], 'elementIndex': matches[0]['index']}
+            capture('initial')
             result = call('hover', target('Alternate hover'))
             assert result == {'dispatched': True, 'verified': False, 'hoverRoute': 'accessibility', 'systemPointerMoved': False}, result
             wait_for(lambda: json.loads(state_path.read_text())['alternateShown'], 'AX alternate reveal')
+            capture('alternate')
             result = call('hover', target('Alternate child'))
             assert result == {'dispatched': False, 'verified': False, 'hoverRoute': 'accessibility', 'systemPointerMoved': False}, result
             call('click', target('Alternate child'))
             wait_for(lambda: json.loads(state_path.read_text())['clicks'] == 1, 'AX child click')
             before = json.loads(state_path.read_text())
-            call('hover', target('Tracking only'), 'UNSUPPORTED')
+            # Tracking-only views have no actionable AX index. Use their actual
+            # window-relative center from the owned fixture, not an invented index.
+            assert before['windowId'] == window['windowId'], before
+            call('hover', {**owner, 'windowId': window['windowId'], **before['trackingPoint']}, 'UNSUPPORTED')
             final = wait_for(lambda: (s if (s := json.loads(state_path.read_text()))['restores'] == 1 else None), 'AX alternate restore')
             assert not final['alternateShown'] and final['reveals'] == 1, final
             assert final['trackingEntries'] == before['trackingEntries'], final
             assert not final['cursorChanged'] and not final['frontChanged'], final
+            capture('restored')
+            record('passed', value=final)
             print('PASS: AX alternate reveal, child, restore and tracking-only UNSUPPORTED; cursor and foreground unchanged')
+        except BaseException as error:
+            record('failed', error=str(error))
+            raise
         finally:
             if stream:
                 stream.close()
@@ -210,6 +263,10 @@ def main():
                 connection.close()
             stop_owned(helper_process)
             stop_owned(fixture)
+            record('cleanup', helperExit=helper_process.returncode if helper_process else None,
+                   fixtureExit=fixture.returncode if fixture else None)
+            if evidence:
+                evidence.close()
 
 
 if __name__ == '__main__':

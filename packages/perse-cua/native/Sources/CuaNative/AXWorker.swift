@@ -394,14 +394,16 @@ actor AXWorker {
                         : (button == "left" && count == 1 ? (names.contains("AXPress") ? "AXPress" : names.contains("AXPick") ? "AXPick" : nil) : nil)
                     if let action {
                         try await performAXClick(resolve: {
-                            guard let bounds = try? self.ax().bounds(selected), bounds.width > 0, bounds.height > 0,
+                            // Keep AX references inside this actor's synchronous callback.
+                            guard let selected = try? self.element(handle, params),
+                                  let bounds = try? self.ax().bounds(selected), bounds.width > 0, bounds.height > 0,
                                   let ownerWindow = try? self.ax().enclosingWindow(selected, owner: identity) else { return nil }
                             let route = WindowRoute(owner: identity, windowID: ownerWindow.windowID, bounds: ownerWindow.bounds)
                             let point = WindowPointerInput.elementPoint(bounds, in: route)
                             guard (try? WindowPointerInput.validate(point, in: route)) != nil else { return nil }
                             return AXClickVisualTarget(route: route, point: point)
                         }, plan: self.planPointer, checkCancellation: { try self.cancellation.check() },
-                           perform: { try self.ax().perform(selected, action) }, mark: self.didPostClick)
+                           perform: { try self.ax().perform(self.element(handle, params), action) }, mark: self.didPostClick)
                         return .result(Self.actionResult)
                     }
                     try ax().requireEnabled(selected)

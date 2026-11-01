@@ -76,6 +76,9 @@ final class Fixture: NSObject, NSApplicationDelegate {
         }
         window.level = .normal
         window.orderBack(nil)
+        verifyOrderedWindow(attemptsRemaining: 100)
+    }
+    func verifyOrderedWindow(attemptsRemaining: Int) {
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == initialFront,
               NSEvent.mouseLocation == initialCursor,
               let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
@@ -89,10 +92,19 @@ final class Fixture: NSObject, NSApplicationDelegate {
                   let layer = item[kCGWindowLayer as String] as? Int else { return nil }
             return WindowOrderEntry(id: id, pid: pid, layer: layer)
         }
+        // orderBack is asynchronous with respect to WindowServer enumeration.
+        // Wait only for our window to appear; never relax the ordering check.
+        if !entries.contains(where: { $0.id == window.windowNumber && $0.pid == getpid() }), attemptsRemaining > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
+                self?.verifyOrderedWindow(attemptsRemaining: attemptsRemaining - 1)
+            }
+            return
+        }
         guard entries.count == windows.count,
               fixtureIsBehindOtherNormalWindows(entries, fixtureID: window.windowNumber, fixturePID: Int(getpid())) else {
             window.orderOut(nil)
-            fputs("Cannot verify fixture window is behind other applications\n", stderr)
+            let order = entries.map { "\($0.id):\($0.pid):\($0.layer)" }.joined(separator: ",")
+            fputs("Cannot verify fixture window is behind other applications: fixtureID=\(window.windowNumber), fixturePID=\(getpid()), entries=\(order)\n", stderr)
             exit(1)
         }
         persist()
@@ -110,7 +122,9 @@ final class Fixture: NSObject, NSApplicationDelegate {
     func persist() {
         let state: [String: Any] = ["alternateShown": alternate.shown, "reveals": alternate.reveals,
             "restores": alternate.restores, "clicks": alternate.clicks, "trackingEntries": tracking.entries,
-            "trackingExits": tracking.exits, "cursorChanged": cursorChanged, "frontChanged": frontChanged]
+            "trackingExits": tracking.exits, "cursorChanged": cursorChanged, "frontChanged": frontChanged,
+            "windowId": window.windowNumber,
+            "trackingPoint": ["x": tracking.frame.midX, "y": window.frame.height - tracking.frame.midY]]
         guard let data = try? JSONSerialization.data(withJSONObject: state) else { return }
         try? data.write(to: URL(fileURLWithPath: statePath), options: .atomic)
     }
@@ -122,10 +136,11 @@ final class Fixture: NSObject, NSApplicationDelegate {
         let app = NSApplication.shared
         let fixture = Fixture(path: CommandLine.arguments[1])
         app.delegate = fixture
-        guard app.setActivationPolicy(.regular),
+        app.setActivationPolicy(.regular)
+        guard app.activationPolicy() == .regular,
               NSEvent.mouseLocation == fixture.initialCursor,
               NSWorkspace.shared.frontmostApplication?.processIdentifier == fixture.initialFront else {
-            fputs("Cannot establish a nonactivating regular fixture application\n", stderr)
+            fputs("Cannot establish a nonactivating regular fixture application: policy=\(app.activationPolicy().rawValue), cursorChanged=\(NSEvent.mouseLocation != fixture.initialCursor), initialFront=\(String(describing: fixture.initialFront)), currentFront=\(String(describing: NSWorkspace.shared.frontmostApplication?.processIdentifier))\n", stderr)
             exit(1)
         }
         app.run()

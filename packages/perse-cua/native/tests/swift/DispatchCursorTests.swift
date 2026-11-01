@@ -3,6 +3,35 @@ import Foundation
 import Testing
 @testable import CuaNative
 
+@Test func cursorAnimationResumesWhenCompletionPrecedesInstallation() async throws {
+    let completion = CursorAnimationCompletion()
+    completion.finish(nil)
+    completion.finish(CancellationError())
+    try await withCheckedThrowingContinuation { completion.install($0) }
+}
+
+@Test func cursorAnimationPreservesCancellationBeforeInstallation() async {
+    let completion = CursorAnimationCompletion()
+    completion.finish(CancellationError())
+    completion.finish(nil)
+    do {
+        try await withCheckedThrowingContinuation { completion.install($0) }
+        Issue.record("Cancelled animation resumed successfully")
+    } catch {
+        #expect(error is CancellationError)
+    }
+}
+
+@Test func cursorAnimationResumesOnlyOnceAfterInstallation() async throws {
+    let completion = CursorAnimationCompletion()
+    try await withCheckedThrowingContinuation { continuation in
+        completion.install(continuation)
+        completion.finish(nil)
+        completion.finish(CancellationError())
+        completion.finish(nil)
+    }
+}
+
 private final class DispatchTrace: WindowPointerPosting, @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [String] = []

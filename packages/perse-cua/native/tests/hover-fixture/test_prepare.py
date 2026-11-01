@@ -18,6 +18,8 @@ class FixturePreparationTests(unittest.TestCase):
         self.assertFalse(info.get('LSUIElement', False))
         source = Path(__file__).with_name('Fixture.swift').read_text()
         self.assertIn('app.setActivationPolicy(.regular)', source)
+        self.assertIn('guard app.activationPolicy() == .regular', source)
+        self.assertNotIn('guard app.setActivationPolicy', source)
         self.assertNotIn('activate(', source)
         self.assertIn('frontmostApplication?.processIdentifier == fixture.initialFront', source)
 
