@@ -10,7 +10,7 @@ Desktop automation for DSH: macOS defaults to the native `cua` tool; other platf
 
 -----
 
-On macOS 14 or later the default backend is the experimental DSH native provider. The model uses the registered `cua` tool and its per-application authorization flow directly; it supports background AX operations and screenshots, but not typed browser tabs. For those, explicitly configure the MCP backend and follow its authorization; never switch providers to bypass denied or revoked access. It asks for application consent and requires the host to provide the DSH 0.2.1-rc.2 services. Its preview captures authorized windows after observed operations without changing model screenshot coordinates. The combined native GUI, consent and cursor experience has not been verified. The driver measurements and behavior below apply to `backend: mcp`.
+On macOS 14 or later the default backend is the experimental DSH native provider. The model uses the registered `cua` tool and its per-application authorization flow directly; it supports background AX operations and screenshots, but not typed browser tabs. For those, explicitly configure the MCP backend and follow its authorization; never switch providers to bypass denied or revoked access. It asks for application consent and requires the host to provide the DSH 0.2.1-rc.2 services. Its preview captures authorized windows after observed operations without changing model screenshot coordinates. Controlled macOS validation covered window-scoped AX reads, captures, reversible AX clicks and human observation of cursor position and fade. Separate preview-host checks covered multi-window refresh and session isolation. These checks do not establish universal background coordinate clicks or tracking-only hover. The driver measurements and behavior below apply to `backend: mcp`.
 
 Native hover uses AX alternate UI when available. Otherwise it returns `UNSUPPORTED` without activating the app or moving the system pointer; use an advertised accessibility action or operate the control manually. Leaving previously revealed alternate UI may restore it before this error. A newly revealed alternate UI reports `dispatched: true`; entering an already revealed descendant reports `dispatched: false` because no new AX action is sent; consumers must accept either boolean. Both report `verified: false`, `hoverRoute: "accessibility"`, and `systemPointerMoved: false`; inspect fresh state to confirm the effect. Successful hover displays a virtual cursor at the target position observed before the action; it may be stale if the target moves during the action and does not verify the result. Disconnecting drops hover tracking without restoring the application UI. AX clicks with available target geometry also display the native cursor and click marker. The marker remains fully visible for 1.5 seconds before fading over 0.5 seconds, unless another input or an error hides it sooner. The separate cursor window is excluded from native window captures.
 
@@ -98,7 +98,7 @@ this plugin owns that MCP connection itself:
 
 ```sh
 npm pack --workspace perse-cua
-dsh plugin --profile web add ./perse-cua-0.3.1-rc.1.tgz
+dsh plugin --profile web add ./perse-cua-0.3.1-rc.2.tgz
 ```
 
 ### Configuration
