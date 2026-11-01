@@ -108,6 +108,10 @@ var Request = z.discriminatedUnion("method", [
   operation("saveScreenshot", window)
 ]);
 var NativeResourceParameters = {
+  // Background previews must not mutate the model's last observed window geometry.
+  // This flag is supplied only by the Host and is not part of the model tool schema.
+  listWindows: z.object({ displayOnly: z.boolean().optional() }).strict(),
+  screenshot: z.object({ displayOnly: z.boolean().optional() }).strict(),
   getState: z.object({ maxElements: z.number().int().min(1).max(1e4), maxDepth: z.number().int().min(1).max(100) }).strict(),
   drag: z.object({ durationMs: z.number().int().min(1).max(5e3), steps: z.number().int().min(1).max(240) }).strict(),
   paste: z.object({

@@ -209,6 +209,9 @@
             "appHandle": {
               "type": "string",
               "minLength": 1
+            },
+            "displayOnly": {
+              "type": "boolean"
             }
           },
           "required": [
@@ -986,6 +989,9 @@
               "type": "integer",
               "exclusiveMinimum": 0,
               "maximum": 4294967295
+            },
+            "displayOnly": {
+              "type": "boolean"
             }
           },
           "required": [

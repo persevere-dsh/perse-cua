@@ -1,6 +1,19 @@
 // Wire validation and nullable observations do not require desktop access.
 import Foundation
 import Testing
+
+@Test func acceptsOnlyBooleanHostPreviewFlags() throws {
+    for method in ["listWindows", "screenshot"] {
+        let request = try NativeRequest(data: Data("{\"id\":\"preview\",\"method\":\"\(method)\",\"params\":{\"displayOnly\":true}}".utf8))
+        let params = try RequestParameters(request)
+        #expect(try params.optionalBoolean("displayOnly") == true)
+        let invalid = try NativeRequest(data: Data("{\"id\":\"preview\",\"method\":\"\(method)\",\"params\":{\"displayOnly\":\"yes\"}}".utf8))
+        let invalidParams = try RequestParameters(invalid)
+        #expect(throws: NativeFailure.self) { try invalidParams.optionalBoolean("displayOnly") }
+    }
+    let unrelated = try NativeRequest(data: Data(#"{"id":"preview","method":"getState","params":{"displayOnly":true}}"#.utf8))
+    #expect(throws: NativeFailure.self) { try RequestParameters(unrelated) }
+}
 @testable import CuaNative
 
 @Test func acceptsExplicitApplicationInstanceIntent() throws {

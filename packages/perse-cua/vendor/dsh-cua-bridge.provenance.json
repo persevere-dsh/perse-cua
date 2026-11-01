@@ -1,13 +1,13 @@
 {
-  "coreBaseCommit": "4007fce3cf142fd0ec062d32da1ec4d7d77040d9",
+  "coreBaseCommit": "0dd7245ed2c7267ab4649293a0705d2e693f86e5",
   "inputs": {
     "packages/experimental/cua/src/bridge.ts": "67744cc4b92adab83d250da7bc095b9a928ba828ea4217938c5b35e7d81c50cf",
     "packages/experimental/cua/src/api.ts": "e3a585fec95bbac7fa18241fe4bdce8401f3070c27de797aa465f545a80c8a92",
-    "packages/experimental/cua/src/protocol.ts": "514ca73ceea1a357c18966b41984868bcab971ae07245f4b44380faa7298d976",
+    "packages/experimental/cua/src/protocol.ts": "6363f26bc59ed816f6c28251d088ed4dcca69547165dbc168ecaf091333073a3",
     "packages/experimental/cua/src/types.ts": "b08c142cfc5e5bf4638d0aafa2de8d563d97fd6e8e12b8e34678c1d385b517dc",
     "packages/experimental/cua/src/screenshot-artifact.ts": "c0547aed729661baf17a4b777d7412f8849545a4db4c8e37cb463a7f68033fab",
     "packages/experimental/cua/src/native-client.ts": "480e2fe5633c7fb81f28e336f0302480f75d02839bd850ba80d823ca623744c3"
   },
-  "bridgeSha256": "024ff0bec5c78c072dee54ee41ca2240e090b9ebd56f362b6bae4f37d8485bbf",
+  "bridgeSha256": "c1a2b9707d71e0c615c317f2c714942b97034249c1a58642e12fd6efe04f848f",
   "screenshotArtifactSha256": "06727372b96bdb25fde1859aa80ebb56fc1a77907a191c0cf68afb24b4d58d32"
 }
