@@ -86,5 +86,5 @@ export async function startFixtureHost(helperPath, options = {}) {
     await close(true)
     throw error
   }
-  return () => close()
+  return Object.assign(() => close(), { crash: () => { if (!current) throw new Error('fixture service is not running'); current.child.kill('SIGKILL') } })
 }

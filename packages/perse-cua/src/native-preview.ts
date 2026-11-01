@@ -7,11 +7,17 @@ type RecordValue = Record<string, unknown>
 const record = (value: unknown): RecordValue | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as RecordValue : undefined
 
 const connectionFailures = new Set(['PERMISSION_DENIED', 'NATIVE_CLOSED', 'NATIVE_DISPOSED', 'NATIVE_CLEANUP', 'NATIVE_IO', 'NATIVE_EOF', 'NATIVE_EXITED', 'NATIVE_PROTOCOL', 'NATIVE_RESPONSE_LIMIT'])
+const transportFailures = new Set(['NATIVE_START_FAILED', 'NATIVE_CLOSED', 'NATIVE_DISPOSED', 'NATIVE_CLEANUP', 'NATIVE_IO', 'NATIVE_EOF', 'NATIVE_EXITED', 'NATIVE_PROTOCOL', 'NATIVE_RESPONSE_LIMIT'])
 const failureKind = (code: unknown): 'connection' | 'application' | 'timeout' | 'other' =>
   typeof code === 'string' && connectionFailures.has(code) ? 'connection' : code === 'STALE_APP' ? 'application' : code === 'NATIVE_TIMEOUT' ? 'timeout' : 'other'
 
 /** Project native tool outcomes to per-agent, per-window previews. */
 export function observeNative(ctx: Context, view: PreviewService, options: { intervalMs?: number | undefined } = {}): { hooks: Hooks; close: () => void } {
+  const getService = typeof ctx.get === 'function' ? ctx.get.bind(ctx) as (name: string) => unknown : undefined
+  const health = getService?.('profileToolAdmission') as {
+    reportHealth?: (name: string, scope: object, status: { state: 'ready' | 'unavailable'; reason?: string }) => void
+    health?: (name: string, scope: object) => { state: 'unknown' | 'ready' | 'unavailable'; reason?: string }
+  } | undefined
   const clients = new Map<Agent, Capture>()
   const lists = new Map<Agent, ListWindows>()
   const watchers = new Map<string, number>()
@@ -40,6 +46,17 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
   const owners = new Map<Agent, Map<string, { name: string; selected?: number; windows: Map<number, PreviewWindow>; snapshots: Map<string, number>; modelImages: Map<number, { image: string; width: number; height: number }>; observations: Map<number, { width: number; height: number }>; windowSizes: Map<number, { width: number; height: number }>; captures: Map<number, { image: string; width: number; height: number }> }>>()
   const idFor = (agent: Agent, handle: string, id: number): string => `${encodeURIComponent(agent.id)}/${encodeURIComponent(handle)}/${id}`
   const disposed = new WeakSet<Agent>()
+  const recordConnectionFailure = (agent: Agent, code: string): void => {
+    if (closed || disposed.has(agent) || !transportFailures.has(code)) return
+    health?.reportHealth?.('cua', agent, { state: 'unavailable', reason: code })
+    const status = health?.health?.('cua', agent) ?? { state: 'unavailable', reason: code }
+    if (status.state === 'unavailable') view.put({ id: `${encodeURIComponent(agent.id)}/native-status`, title: 'CUA', action: 'getState', failed: true, previewUnavailable: true, previewIssue: 'connection' })
+  }
+  const recordConnectionReady = (agent: Agent): void => {
+    if (closed || disposed.has(agent)) return
+    health?.reportHealth?.('cua', agent, { state: 'ready' })
+    view.remove(`${encodeURIComponent(agent.id)}/native-status`)
+  }
   const invalidateFrames = (agent: Agent, handle: string, scope: 'application' | 'connection', reason: 'discoveryUnavailable' | 'previewUnavailable', issue?: PreviewWindow['previewIssue']): void => {
     const apps = owners.get(agent)
     if (!apps) return
@@ -423,6 +440,8 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
   })
   return {
     hooks: {
+      onConnectionReady: recordConnectionReady,
+      onConnectionFailure: recordConnectionFailure,
       onClient: (agent, capture, list) => { if (!closed && !disposed.has(agent)) { clients.set(agent, capture); if (list) lists.set(agent, list) } },
       onRevoke: (agent) => {
         const apps = owners.get(agent)

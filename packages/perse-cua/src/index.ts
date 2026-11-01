@@ -153,8 +153,11 @@ export const apply = (ctx: Context & { tools: { register: (definition: unknown) 
   if (config.presenterOnly !== true && process.platform === 'darwin') {
     const service = ctx.get.bind(ctx) as (name: string) => unknown
     const admission = service('profileToolAdmission')
-    if (service('profileContext') !== undefined && (admission === null || typeof admission !== 'object' || !('version' in admission) || admission.version !== 1)) {
-      throw new Error('perse-cua requires DSH profile tool admission version 1; update the host before enabling CUA')
+    if (service('profileContext') !== undefined && (admission === null || typeof admission !== 'object' || !('version' in admission) || admission.version !== 1
+      || !('health' in admission) || typeof admission.health !== 'function'
+      || !('reportHealth' in admission) || typeof admission.reportHealth !== 'function'
+      || !('reportStartupFailure' in admission) || typeof admission.reportStartupFailure !== 'function')) {
+      throw new Error('perse-cua requires DSH profile tool admission version 1 with health reporting; update the host before enabling CUA')
     }
   }
   const view = new PreviewService(ctx)

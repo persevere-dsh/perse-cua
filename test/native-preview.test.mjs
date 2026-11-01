@@ -4,6 +4,25 @@ import { observeNative } from '../packages/perse-cua/lib/types/native-preview.js
 
 const testSignal = new AbortController().signal
 
+test('reports connection failure and recovery to the owning session and preview', () => {
+  const listeners = new Map(), windows = new Map(), reports = []
+  const policy = { reportHealth(name, scope, status) { reports.push({ name, scope, status }) } }
+  const ctx = { get(name) { return name === 'profileToolAdmission' ? policy : undefined }, on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+  const view = { setDismissHandler() {}, setWatchHandler() {}, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+  const preview = observeNative(ctx, view)
+  const agent = { id: 'session-a' }
+  preview.hooks.onConnectionFailure(agent, 'NATIVE_EXITED')
+  assert.deepEqual(reports.at(-1), { name: 'cua', scope: agent, status: { state: 'unavailable', reason: 'NATIVE_EXITED' } })
+  assert.equal(windows.get('session-a/native-status').previewIssue, 'connection')
+  preview.hooks.onConnectionReady(agent)
+  assert.deepEqual(reports.at(-1), { name: 'cua', scope: agent, status: { state: 'ready' } })
+  assert.equal(windows.has('session-a/native-status'), false)
+  preview.hooks.onConnectionFailure(agent, 'NATIVE_EOF')
+  assert.deepEqual(reports.at(-1), { name: 'cua', scope: agent, status: { state: 'unavailable', reason: 'NATIVE_EOF' } })
+  assert.equal(windows.get('session-a/native-status').previewIssue, 'connection')
+  preview.close()
+})
+
 test('turn end stops pending capture and resumes only when the next turn uses CUA', async () => {
   const listeners = new Map(), windows = new Map(), pending = []
   let lists = 0

@@ -63,9 +63,11 @@ var NativeClient = class {
 	* @param config - Executable, transport bounds and deadlines.
 	* @param createChannel - Platform-owned connection and process lifecycle.
 	* @param reportDiagnostic - Optional Host diagnostic sink; never receives captured content.
+	* @param reportFailure - Optional connection-failure observer for this Agent.
 	*/
-	constructor(owner, config, createChannel, reportDiagnostic) {
+	constructor(owner, config, createChannel, reportDiagnostic, reportFailure) {
 		this.reportDiagnostic = reportDiagnostic;
+		this.reportFailure = reportFailure;
 		this.config = config;
 		this.handle = createChannel(owner, config);
 		this.handle.stdout.on("data", (chunk) => {
@@ -245,6 +247,9 @@ var NativeClient = class {
 	fail(error) {
 		if (this.failure) return;
 		this.failure = error;
+		if (error.code !== "NATIVE_DISPOSED") {
+			try { this.reportFailure?.(error.code); } catch {}
+		}
 		this.chunks.length = 0;
 		this.bufferedBytes = 0;
 		this.active?.reject(error);
@@ -1192,9 +1197,16 @@ function installCua(ctx, config, backend) {
 					let created = false;
 					if ("appHandle" in request.params && !client) throw new NativeError("APP_ACCESS_REQUIRED", "Select the application with getApp before reading or controlling it");
 					if (!client || client.disposed && !("appHandle" in request.params)) {
-						client = new NativeClient(ctx, native, backend.createChannel, (message) => {
-							ctx.logger.debug(message);
-						});
+						try {
+							client = new NativeClient(ctx, native, backend.createChannel, (message) => {
+								ctx.logger.debug(message);
+							}, (code) => {
+								if (!lifetime.signal.aborted && !owner.signal.aborted && clients.get(agent) === client) backend.onConnectionFailure?.(agent, code);
+							});
+						} catch (error) {
+							try { backend.onConnectionFailure?.(agent, "NATIVE_START_FAILED"); } catch {}
+							throw error;
+						}
 						clients.set(agent, client);
 						created = true;
 						owner.coordinates = new CuaCoordinates();
@@ -1227,6 +1239,9 @@ function installCua(ctx, config, backend) {
 							coordinates: owner.coordinates
 						});
 						signal.throwIfAborted();
+						if (!nativeClient.disposed) {
+							try { backend.onConnectionReady?.(agent); } catch {}
+						}
 						return result;
 					};
 					return "appHandle" in request.params ? access.run(nativeClient, request.params.appHandle, signal, dispatch) : dispatch(signal);

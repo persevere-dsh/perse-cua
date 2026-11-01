@@ -45,6 +45,14 @@ test('macOS rejects MCP backend and driver settings before starting a provider',
   assert.throws(() => Main.apply(ctx, {}), /requires DSH profile tool admission version 1/)
 })
 
+test('missing native helper reports startup failure to the profile owner', { skip: process.platform !== 'darwin' }, () => {
+  const ctx = new Context(), failures = []
+  ctx.provide('profileContext', {})
+  ctx.provide('profileToolAdmission', { version: 1, health() {}, reportHealth() {}, reportStartupFailure(name, reason) { failures.push({ name, reason }) } })
+  assert.throws(() => Main.apply(ctx, { backend: 'native', helperPath: '/nonexistent/perse-cua-helper' }), /unavailable or not executable/)
+  assert.deepEqual(failures, [{ name: 'cua', reason: 'NATIVE_HELPER_UNAVAILABLE' }])
+})
+
 test('an existing native provider rejects a second provider before activation', { skip: process.platform !== 'darwin' }, async () => {
   const ctx = await host()
   try {
@@ -221,7 +229,8 @@ test('saved fixture consent is written to the loader entry and reused after rest
       ctx.baseUrl = pathToFileURL(home).href + '/'
       ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
       ctx.provide('profileContext', profile)
-      ctx.provide('profileToolAdmission', { version: 1, stage() {} })
+      const healthReports = []
+      ctx.provide('profileToolAdmission', { version: 1, stage() {}, health() { return { state: 'unknown' } }, reportHealth(name, agent, health) { healthReports.push({ name, agent, health }) }, reportStartupFailure() {} })
       ctx.provide('appReady', { onReady: listener => { listener(); return () => {} } })
       ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: [answer] }] } } })
       for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess, ConfigEditor]) await ctx.plugin(plugin)
@@ -232,16 +241,19 @@ test('saved fixture consent is written to the loader entry and reused after rest
       await waitFor(() => ctx.tools.get('cua') && ctx.get('settings'))
       const agent = { id: 'fixture-agent', ctx }
       ctx.agents.get = id => id === agent.id ? agent : undefined
-      return { ctx, agent, tool: ctx.tools.get('cua') }
+      return { ctx, agent, tool: ctx.tools.get('cua'), healthReports }
     }
     const first = await open('Always allow')
     await first.tool.execute({ method: 'getApp', params: { selector: 'Fixture' } }, { agent: first.agent, signal: new AbortController().signal, callId: 'first' })
+    assert.ok(first.healthReports.some(item => item.name === 'cua' && item.agent === first.agent && item.health.state === 'ready'))
     assert.match(await readFile(profile.patchPath, 'utf8'), /a{64}/)
     assert.ok(first.ctx.settings.describe().some(item => item.ns === 'perse-cua'))
     await first.ctx.fiber.dispose()
     const second = await open('Deny')
     const app = await second.tool.execute({ method: 'getApp', params: { selector: 'Fixture' } }, { agent: second.agent, signal: new AbortController().signal, callId: 'second' })
     assert.ok(app.appHandle)
+    closeHost.crash()
+    await waitFor(() => second.healthReports.some(item => item.agent === second.agent && item.health.state === 'unavailable'))
   } finally {
     for (const ctx of contexts) await ctx.fiber.dispose()
     await closeHost()

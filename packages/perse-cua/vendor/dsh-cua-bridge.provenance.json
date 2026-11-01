@@ -1,5 +1,5 @@
 {
-  "coreBaseCommit": "4e0de798105d6851c3b273f47b891845ec97d162",
+  "coreBaseCommit": "4007fce3cf142fd0ec062d32da1ec4d7d77040d9",
   "inputs": {
     "packages/experimental/cua/src/bridge.ts": "67744cc4b92adab83d250da7bc095b9a928ba828ea4217938c5b35e7d81c50cf",
     "packages/experimental/cua/src/api.ts": "e3a585fec95bbac7fa18241fe4bdce8401f3070c27de797aa465f545a80c8a92",
