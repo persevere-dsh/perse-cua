@@ -151,7 +151,8 @@ const Ready = z.object({
 	protocol: z.literal(1),
 	runtimeKey: z.string(),
 	pid: z.number().int().positive(),
-	instanceId: z.string().min(1)
+	instanceId: z.string().min(1),
+	capabilities: z.array(z.string()).optional()
 }).strict();
 const Refusal = z.object({
 	type: z.literal("error"),
@@ -194,6 +195,7 @@ var SharedNativeChannel = class {
 	socket;
 	socketClosed;
 	connected = false;
+	supportsVisual = false;
 	closing = false;
 	cleanupTimer;
 	cleanupFailure;
@@ -339,12 +341,17 @@ var SharedNativeChannel = class {
 	async connect(location) {
 		for (;;) {
 			await this.ensureShared(location);
-			const socket = await this.connectOnce(join(location.directory, `${location.runtimeKey}.sock`), location.runtimeKey);
+			let socket;
+            try { socket = await this.connectOnce(join(location.directory, `${location.runtimeKey}.sock`), location.runtimeKey, true); }
+            catch (error) {
+                if (error?.code !== "NATIVE_PROTOCOL" || error.message !== "Expected shared helper protocol 1 hello for this runtime") throw error;
+                socket = await this.connectOnce(join(location.directory, `${location.runtimeKey}.sock`), location.runtimeKey, false);
+            }
 			if (socket) return socket;
 			await setTimeout$1(25, void 0, { signal: this.startup.signal });
 		}
 	}
-	async connectOnce(path, runtimeKey) {
+	async connectOnce(path, runtimeKey, visual) {
 		this.startup.signal.throwIfAborted();
 		const socket = new Socket();
 		this.socket = socket;
@@ -380,6 +387,7 @@ var SharedNativeChannel = class {
 				type: "hello",
 				protocol: 1,
 				runtimeKey,
+				...(visual ? { capabilities: ["visual-v1"] } : {}),
 				config: {
 					maxRequestBytes,
 					maxResponseBytes,
@@ -409,7 +417,9 @@ var SharedNativeChannel = class {
 					socket.destroy(transportError(refusal.data.code, refusal.data.message));
 					return;
 				}
-				if (Ready.parse(value).runtimeKey !== runtimeKey) throw transportError("NATIVE_PROTOCOL", "Native handshake returned a different runtime identity");
+				const ready = Ready.parse(value);
+				if (ready.runtimeKey !== runtimeKey) throw transportError("NATIVE_PROTOCOL", "Native handshake returned a different runtime identity");
+				this.supportsVisual = visual && ready.capabilities?.includes("visual-v1") === true;
 				admission.status = "accepted";
 				socket.removeListener("data", receive);
 				this.startup.signal.removeEventListener("abort", abort);
@@ -471,7 +481,7 @@ function createSharedNativeChannel(owner, config) {
 //#region lib/types/guidance.js
 /** macOS operation guidance supplied with the shared CUA object API. */
 /** Instructions for raw operation calls and optional object-API bindings. */
-const GUIDANCE = `Use cua with method getCapabilities and params {} to inspect permissions and sessionLocked. If sessionLocked is true or an operation reports SESSION_LOCKED, stop UI attempts and ask the user to unlock macOS. A null sessionLocked means no usable console session was verified. After unlocking, read fresh state; screenshots from a locked desktop are not current observations. Use listApps or cua.getState to discover running applications, and findApps(query) to search installed applications by name, bundle ID or absolute path. getApp requests user consent before launching a stopped application in the background, or before observations and input on a running one. Set instance: "new" to request a separate application instance by name, bundle ID or path; after an uncertain launch, inspect running apps before trying again. If access is denied or revoked, stop using that application until the user explicitly grants access again. Never switch tools to bypass a refusal. Keep the returned appHandle; every app operation requires it. listWindows returns window IDs and point bounds. Raw getState returns AX text and snapshotId. Menu-bar entries are shown by default; includeMenus=true expands their contents. details=true adds identifiers, global-point bounds and complete action names. Both options also apply to getAXState. Each read replaces the indices for that app/window scope. Use its element indices only with that snapshotId. Raw screenshot and coordinate operations require a windowId. Coordinates are pixels in the latest returned screenshot, measured from its top-left. Set relative:true for integer thousandths from 0 to 1000 instead. The Host converts both modes to native window points; AX detail bounds remain global macOS points. A verified window can expose no AX elements. Its empty snapshot permits screenshots and coordinate input; element-index actions require an element from a fresh AX observation.
+const GUIDANCE = `Use cua with method getCapabilities and params {} to inspect permissions and sessionLocked. If sessionLocked is true or an operation reports SESSION_LOCKED, stop UI attempts and ask the user to unlock macOS. A null sessionLocked means no usable console session was verified. After unlocking, read fresh state; screenshots from a locked desktop are not current observations. Use listApps or cua.getState to discover running applications, and findApps(query) to search installed applications by name, bundle ID or absolute path. getApp selects an application and launches it in the background if needed. Set instance: "new" to request a separate application instance by name, bundle ID or path; after an uncertain launch, inspect running apps before trying again. Never switch tools to bypass a refusal. Keep the returned appHandle; every app operation requires it. listWindows returns window IDs and point bounds. Raw getState returns AX text and snapshotId. Menu-bar entries are shown by default; includeMenus=true expands their contents. details=true adds identifiers, global-point bounds and complete action names. Both options also apply to getAXState. Each read replaces the indices for that app/window scope. Use its element indices only with that snapshotId. Raw screenshot and coordinate operations require a windowId. Coordinates are pixels in the latest returned screenshot, measured from its top-left. Set relative:true for integer thousandths from 0 to 1000 instead. The Host converts both modes to native window points; AX detail bounds remain global macOS points. A verified window can expose no AX elements. Its empty snapshot permits screenshots and coordinate input; element-index actions require an element from a fresh AX observation.
 
 Initialize the object API once in persistent PTC. Reuse its variables in later calls; put temporary declarations inside { ... } blocks to avoid redeclaration errors. All object methods are async. getAXState returns text, not a structured state object. Its text separates values and placeholders, and reports subroles, help, URLs, disabled/focused/selected/expanded state and UTF-16 selection ranges when available. Writability is true, false or unknown on relevant controls; omitted state fields do not assert false. selection=unavailable means the reported range exceeds the observed text. Compact output omits ordinary Press/Pick (click), ShowMenu (right click) and ScrollToVisible actions; details=true lists every available action. Use the displayed action name with performSecondaryAction; ambiguous aliases require the complete name from details=true. Truncation reports the reached provider limit. Narrow the window or increase that provider limit before reading again.
 
@@ -479,7 +489,7 @@ Use app methods directly for single-window tasks; getApp already reads initial A
 
 CuaScreenshot contains { bytes: Uint8Array, mimeType: "image/png" | "image/jpeg" | "image/webp" | "image/gif", pixelWidth: number, pixelHeight: number, windowId: number }. Use mimeType to choose a file extension or declare an image; do not assume PNG.
 
-For a screenshot the user should open, use saveScreenshot (raw method saveScreenshot with appHandle and windowId), then present its returned path. This works with text-only models: no pixels are delivered to the model, so do not describe unseen image contents or use that file to choose pixel coordinates. The artifact uses validated attachment storage and the current task filesystem; failure to save or read it is an error. It does not replace getScreenshot, which requires image input support. App consent and Screen Recording permission still apply. Cancellation can leave an unreferenced stored object but never publishes a successful file result.
+For a screenshot the user should open, use saveScreenshot (raw method saveScreenshot with appHandle and windowId), then present its returned path. This works with text-only models: no pixels are delivered to the model, so do not describe unseen image contents or use that file to choose pixel coordinates. The artifact uses validated attachment storage and the current task filesystem; failure to save or read it is an error. It does not replace getScreenshot, which requires image input support. Screen Recording permission still applies. Cancellation can leave an unreferenced stored object but never publishes a successful file result.
 
 Object API signatures (options default to { emit: true }):
 

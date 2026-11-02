@@ -14,9 +14,10 @@ export async function startBench(port = 0) {
     const page = await readFile(new URL('./index.html', import.meta.url))
     const script = await readFile(join(directory, 'bench.js'))
     server = createServer((req, res) => {
-      if (req.method !== 'GET' || !['/', '/bench.js'].includes(req.url)) { res.writeHead(404); res.end(); return }
-      res.writeHead(200, { 'Content-Type': req.url === '/' ? 'text/html; charset=utf-8' : 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
-      res.end(req.url === '/' ? page : script)
+      const pathname = new URL(req.url, 'http://localhost').pathname
+      if (req.method !== 'GET' || !['/', '/bench.js'].includes(pathname)) { res.writeHead(404); res.end(); return }
+      res.writeHead(200, { 'Content-Type': pathname === '/' ? 'text/html; charset=utf-8' : 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
+      res.end(pathname === '/' ? page : script)
     })
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve) })
     return { url: `http://127.0.0.1:${server.address().port}/`, async close() { await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())); await rm(directory, { recursive: true, force: true }) } }

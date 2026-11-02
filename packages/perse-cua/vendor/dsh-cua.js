@@ -10,7 +10,6 @@ import { admitEncodedImages } from "@deepseek-ai/dsh-attachment";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
-import { UserQuestionError } from "@deepseek-ai/dsh-user-questions";
 //#region lib/types/native-client.js
 /** Agent-scoped JSONL requests over a connection to the shared native helper. */
 const Reply = z.union([z.object({
@@ -30,7 +29,9 @@ const ScreenshotDiagnostic = z.object({
 	elapsedMs: z.number().nonnegative(),
 	errorCode: z.string().optional()
 });
-const WireReply = z.union([Reply, ScreenshotDiagnostic.extend({ type: z.literal("diagnostic") })]);
+const VisualPoint = z.object({ t: z.number().nonnegative(), x: z.number().finite(), y: z.number().finite(), angle: z.number().finite() }).strict();
+const VisualEvent = z.object({ type: z.literal("visual"), requestId: z.string().min(1), appHandle: z.string().min(1), windowId: z.number().int().positive(), process: z.object({ pid: z.number().int().positive(), startedSeconds: z.number().int().nonnegative(), startedMicroseconds: z.number().int().min(0).max(999999) }).strict(), geometry: z.object({ x: z.number().finite(), y: z.number().finite(), width: z.number().positive(), height: z.number().positive() }).strict(), sequence: z.number().int().nonnegative(), color: z.string().regex(/^#[0-9A-Fa-f]{6}$/), trajectory: z.object({ samples: z.array(VisualPoint).min(1).max(512), arrivalT: z.number().nonnegative() }).strict(), elapsedMs: z.number().nonnegative(), phase: z.enum(["move", "click", "position", "clear"]) }).strict().refine(event => event.trajectory.samples.every((sample, index, samples) => index === 0 || sample.t > samples[index - 1].t));
+const WireReply = z.union([Reply, ScreenshotDiagnostic.extend({ type: z.literal("diagnostic") }), VisualEvent]);
 /** Native refusal or transport failure with a stable machine-readable code. */
 var NativeError = class extends Error {
 	code;
@@ -65,9 +66,12 @@ var NativeClient = class {
 	* @param reportDiagnostic - Optional Host diagnostic sink; never receives captured content.
 	* @param reportFailure - Optional connection-failure observer for this Agent.
 	*/
-	constructor(owner, config, createChannel, reportDiagnostic, reportFailure) {
+	constructor(owner, config, createChannel, reportDiagnostic, reportFailure, reportVisual) {
 		this.reportDiagnostic = reportDiagnostic;
 		this.reportFailure = reportFailure;
+		this.reportVisual = reportVisual;
+		this.visualSequence = -1;
+		this.visualOwners = new Map();
 		this.config = config;
 		this.handle = createChannel(owner, config);
 		this.handle.stdout.on("data", (chunk) => {
@@ -280,7 +284,18 @@ var NativeClient = class {
 			this.chunks.length = 0;
 			this.bufferedBytes = 0;
 			if ("type" in reply) {
-				this.retainDiagnostic(reply);
+				if (reply.type === "diagnostic") this.retainDiagnostic(reply);
+                else if (this.handle.supportsVisual && reply.sequence > this.visualSequence) {
+                    const key = JSON.stringify([reply.appHandle, reply.windowId]);
+                    const identity = JSON.stringify([reply.requestId, reply.process, reply.geometry]);
+                    const admitted = reply.phase === "clear" ? this.visualOwners.get(key) === identity : this.active?.id === reply.requestId;
+                    if (admitted) {
+                        this.visualSequence = reply.sequence;
+                        if (reply.phase === "clear") this.visualOwners.delete(key);
+                        else { this.visualOwners.delete(key); this.visualOwners.set(key, identity); while (this.visualOwners.size > 128) this.visualOwners.delete(this.visualOwners.keys().next().value); }
+                        try { this.reportVisual?.(reply); } catch {}
+                    }
+                }
 				return;
 			}
 			const active = this.active;
@@ -305,230 +320,40 @@ const ApplicationAuthorizationResult = z.object({
 	executablePath: z.string().min(1),
 	persistable: z.boolean()
 });
-/** Owns application consent and cancels operations when saved access is removed. */
+/** Tracks handles selected by each native client and joins operations on disposal. */
 var ApplicationAccess = class {
-	ctx;
-	options;
-	clients = /* @__PURE__ */ new Map();
-	rejected = /* @__PURE__ */ new Map();
-	active = /* @__PURE__ */ new Set();
-	selections = /* @__PURE__ */ new WeakMap();
-	lifetime = new AbortController();
-	mutationTail = Promise.resolve();
-	disposal;
-	/** @param ctx Host context owning this provider. @param options Live saved grants and profile persistence. */
-	constructor(ctx, options) {
-		this.ctx = ctx;
-		this.options = options;
-		if (options.onVolatile) options.onVolatile(() => this.reconcile());
-		else ctx.on("loader/volatile-update", () => this.reconcile());
-		ctx.effect(() => () => this.dispose(), "cua-application-access.dispose");
-	}
-	/**
-	* Cancel consent waits and join owned operations.
-	* @returns Completion after consent waits and active operations settle.
-	*/
-	dispose() {
-		return this.disposal ??= (async () => {
-			this.lifetime.abort();
-			await Promise.allSettled([this.mutationTail, ...[...this.active].map((operation) => operation.done.promise)]);
-			this.clients.clear();
-			this.rejected.clear();
-		})();
-	}
-	/**
-	* Obtain consent for a freshly selected native handle. Free text never grants access.
-	* @param agent Exact live task requesting access.
-	* @param client Helper that issued the handle.
-	* @param handle Helper handle for a running instance or an approved pending launch.
-	* @param identity Native executable/signing identity.
-	* @param signal Calling tool lifetime.
-	* @returns Completion after consent; refusals reject before launch, AX, screenshots, or input.
-	*/
-	async select(agent, client, handle, identity, signal) {
-		await this.withOperation(agent, client, identity, signal, (signal) => this.selectInOrder(agent, identity.id, async () => {
-			signal.throwIfAborted();
-			const existing = this.clients.get(client)?.handles.get(handle);
-			if (!client.disposed && existing && this.permitted(existing)) return;
-			const saved = identity.persistable && this.options.grants().some((grant) => grant.id === identity.id);
-			let scope = "persistent";
-			if (!saved && this.rejected.get(agent)?.has(identity.id)) throw this.denied(identity);
-			if (client.disposed) throw new NativeError("NATIVE_CLOSED", "Helper is closed; acquire fresh application handles");
-			if (!saved) {
-				const questions = this.ctx.get("userQuestions");
-				if (!questions) throw new NativeError("APP_APPROVAL_UNAVAILABLE", "No human answerer is available for application access");
-				const options = [{ label: "Allow for this task" }, { label: "Deny" }];
-				if (identity.persistable && this.options.save) options.push({ label: "Always allow" });
-				let result;
-				try {
-					result = await questions.ask({
-						agent,
-						signal,
-						questions: [{
-							id: "cua-app-access",
-							question: `Allow Computer Use to launch if needed, read, capture, and control ${identity.name}?`,
-							detail: `Application: ${identity.executablePath}\nTask access applies to the selected application instance, including its launch if needed. macOS permissions and approval of sensitive actions remain separate. Saved access can be revoked by removing its allowedApps entry from this provider configuration. Task access ends with the task.`,
-							options
-						}]
-					});
-				} catch (error) {
-					if (error instanceof UserQuestionError && error.code === "ASK_CANCELLED") {
-						this.invalidate(identity.id, agent);
-						throw this.denied(identity);
-					}
-					if (error instanceof UserQuestionError && error.code === "DELEGATED_CALLER") throw new NativeError("APP_APPROVAL_UNAVAILABLE", "Application approval is unavailable in delegated tasks; ask the main task to perform this operation");
-					throw error;
-				}
-				signal.throwIfAborted();
-				const answer = result.answers.find((answer) => answer.id === "cua-app-access");
-				const chosen = answer && !answer.custom?.trim() && answer.selected.length === 1 ? answer.selected[0] : void 0;
-				if (chosen === "Allow for this task") scope = "task";
-				else if (chosen === "Always allow" && identity.persistable && this.options.save) {
-					const { persistable: _persistable, ...grant } = identity;
-					await this.persist((grants) => {
-						signal.throwIfAborted();
-						return [...grants.filter((item) => item.id !== identity.id), grant];
-					});
-				} else {
-					this.invalidate(identity.id, agent);
-					throw this.denied(identity);
-				}
-			}
-			signal.throwIfAborted();
-			if (client.disposed) throw new NativeError("NATIVE_CLOSED", "Helper is closed; acquire fresh application handles");
-			const state = this.clients.get(client) ?? {
-				agent,
-				handles: /* @__PURE__ */ new Map()
-			};
-			const { persistable: _persistable, ...grant } = identity;
-			for (const [previous, previousState] of this.clients) if (previousState.agent === agent && previous !== client) {
-				for (const selected of previousState.handles.values()) selected.lifetime.abort();
-				this.clients.delete(previous);
-			}
-			state.handles.set(handle, {
-				identity: grant,
-				scope,
-				lifetime: new AbortController()
-			});
-			this.clients.set(client, state);
-			this.rejected.get(agent)?.delete(identity.id);
-		}));
-	}
-	/**
-	* Enforce live consent at the operation that dispatches native work.
-	* @param client Helper owning the application handle.
-	* @param handle Selected application.
-	* @param signal Calling tool lifetime.
-	* @param dispatch One native operation, with revocation cancellation.
-	* @returns The native result, with no implicit retry after consent or cancellation.
-	*/
-	async run(client, handle, signal, dispatch) {
-		const state = this.clients.get(client);
-		const selected = state?.handles.get(handle);
-		if (!state || !selected) throw new NativeError("APP_ACCESS_REQUIRED", "Select the application with getApp and obtain user consent before reading or controlling it");
-		if (!this.permitted(selected)) {
-			if (!selected.lifetime.signal.aborted) this.invalidate(selected.identity.id, state.agent);
-			throw new NativeError("APP_ACCESS_REVOKED", "Application access was revoked; stop using this application");
-		}
-		if (client.disposed) throw new NativeError("NATIVE_CLOSED", "Helper is closed; acquire fresh application handles");
-		return this.withOperation(state.agent, client, selected.identity, AbortSignal.any([signal, selected.lifetime.signal]), dispatch);
-	}
-	async selectInOrder(agent, id, select) {
-		const selections = this.selections.get(agent) ?? /* @__PURE__ */ new Map();
-		this.selections.set(agent, selections);
-		const operation = (selections.get(id) ?? Promise.resolve()).then(select, select);
-		selections.set(id, operation);
-		try {
-			await operation;
-		} finally {
-			if (selections.get(id) === operation) selections.delete(id);
-		}
-	}
-	async withOperation(agent, client, identity, signal, dispatch) {
-		const operation = {
-			agent,
-			client,
-			identity,
-			controller: new AbortController(),
-			done: Promise.withResolvers()
-		};
-		this.active.add(operation);
-		const lifetime = AbortSignal.any([
-			signal,
-			this.lifetime.signal,
-			operation.controller.signal
-		]);
-		try {
-			lifetime.throwIfAborted();
-			const result = await dispatch(lifetime);
-			lifetime.throwIfAborted();
-			return result;
-		} finally {
-			this.active.delete(operation);
-			operation.done.resolve();
-		}
-	}
-	/**
-	* Forget the disposed task's transient decisions and selected handles.
-	* @param agent Disposed task whose transient decisions are released.
-	*/
-	forget(agent) {
-		for (const [client, state] of this.clients) if (state.agent === agent) this.clients.delete(client);
-		this.rejected.delete(agent);
-	}
-	permitted(selection) {
-		return !selection.lifetime.signal.aborted && (selection.scope === "task" || this.options.grants().some((grant) => grant.id === selection.identity.id));
-	}
-	denied(identity) {
-		return new NativeError("APP_ACCESS_DENIED", `The user denied access to ${identity.name}. Do not retry or use another tool to bypass this decision.`);
-	}
-	reject(agent, identity) {
-		const rejected = this.rejected.get(agent) ?? /* @__PURE__ */ new Map();
-		rejected.set(identity.id, {
-			id: identity.id,
-			name: identity.name,
-			executablePath: identity.executablePath
-		});
-		this.rejected.set(agent, rejected);
-	}
-	invalidate(id, agent) {
-		const clients = /* @__PURE__ */ new Set();
-		for (const [client, state] of this.clients) for (const [handle, selection] of state.handles) if (selection.identity.id === id && (agent === void 0 || state.agent === agent)) {
-			selection.lifetime.abort(new NativeError("APP_ACCESS_REVOKED", "Application access was revoked; stop using this application"));
-			this.reject(state.agent, selection.identity);
-			clients.add(client);
-		}
-		for (const operation of this.active) if (operation.identity.id === id && (agent === void 0 || operation.agent === agent)) {
-			this.reject(operation.agent, operation.identity);
-			operation.controller.abort(this.denied(operation.identity));
-			clients.add(operation.client);
-		}
-		for (const client of clients) {
-			const state = this.clients.get(client);
-			const handle = state?.handles.keys().next().value;
-			if (state && handle !== void 0) this.options.onInvalidate?.(state.agent, handle);
-			client.invalidate();
-		}
-	}
-	reconcile() {
-		for (const state of this.clients.values()) for (const selection of state.handles.values()) if (!selection.lifetime.signal.aborted && !this.permitted(selection)) this.invalidate(selection.identity.id);
-	}
-	persist(update) {
-		return this.mutate(async () => {
-			const save = this.options.save;
-			if (!save) throw new Error("Application permissions cannot be saved in this composition");
-			await save(update(this.options.grants()));
-		});
-	}
-	mutate(mutate) {
-		const perform = async () => {
-			this.lifetime.signal.throwIfAborted();
-			await mutate();
-		};
-		const operation = this.mutationTail.then(perform, perform);
-		this.mutationTail = operation;
-		return operation;
-	}
+ clients = new Map();
+ active = new Set();
+ lifetime = new AbortController();
+ disposal;
+ constructor(ctx) { ctx.effect(() => () => this.dispose(), "cua-application-access.dispose"); }
+ dispose() {
+  return this.disposal ??= (async () => {
+   this.lifetime.abort();
+   await Promise.allSettled([...this.active]);
+   this.clients.clear();
+  })();
+ }
+ async select(agent, client, handle, identity, signal) {
+  signal.throwIfAborted();
+  this.lifetime.signal.throwIfAborted();
+  if (client.disposed) throw new NativeError("NATIVE_CLOSED", "Helper is closed; acquire fresh application handles");
+  const state = this.clients.get(client) ?? { agent, handles: new Set() };
+  state.handles.add(handle);
+  this.clients.set(client, state);
+ }
+ async run(client, handle, signal, dispatch) {
+  const state = this.clients.get(client);
+  if (!state?.handles.has(handle)) throw new NativeError("STALE_APP", "Select the application with getApp before reading or controlling it");
+  if (client.disposed) throw new NativeError("NATIVE_CLOSED", "Helper is closed; acquire fresh application handles");
+  const combined = AbortSignal.any([signal, this.lifetime.signal]);
+  combined.throwIfAborted();
+  const operation = dispatch(combined);
+  this.active.add(operation);
+  try { const result = await operation; combined.throwIfAborted(); return result; }
+  finally { this.active.delete(operation); }
+ }
+ forget(agent) { for (const [client, state] of this.clients) if (state.agent === agent) this.clients.delete(client); }
 };
 //#endregion
 //#region lib/types/protocol.js
@@ -898,7 +723,7 @@ var CuaCoordinates = class {
 };
 //#endregion
 //#region lib/types/index.js
-/** Shared CUA tool execution, application consent, and object-runtime integration. */
+/** Shared CUA tool execution and object-runtime integration. */
 /** Validated host configuration; no driver is downloaded at runtime. */
 const CuaConfig = Schema.object({
 	allowedApps: Schema.array(Schema.object({
@@ -981,30 +806,8 @@ function installCua(ctx, config, backend) {
 		graceMs: config.graceMs,
 		textEventIntervalMs: config.textEventIntervalMs
 	};
-	const entryId = ctx.fiber.entry?.options.id;
-	ctx.inject(["settings"], (scope) => scope.effect(() => scope.settings.configure({ auto: false }, ctx.fiber)));
-	const access = new ApplicationAccess(ctx, {
-		onVolatile: backend.onVolatile,
-		onInvalidate: (agent, handle) => backend.onRevoke?.(agent, handle),
-		grants: () => config.allowedApps.get().map((grant) => ({
-			...grant,
-			id: grant.id
-		})),
-		get save() {
-			const settings = ctx.get("settings");
-			if (entryId === void 0 || settings === void 0) return void 0;
-			const descriptor = settings.describe().find((entry) => entry.ns === entryId);
-			if (!descriptor) return void 0;
-			return async (grants) => {
-				await settings.mutate(entryId, [{
-					op: "set",
-					path: ["allowedApps"],
-					value: grants
-				}], descriptor.revision);
-			};
-		}
-	});
-	const clients = /* @__PURE__ */ new Map();
+	const access = new ApplicationAccess(ctx);
+	const clients = new Map();
 	const lifetime = new AbortController();
 	const pending = /* @__PURE__ */ new Map();
 	const dispatchNative = (arbiter, client, kind, method, params, signal, callId, preempt = false) => {
@@ -1195,13 +998,15 @@ function installCua(ctx, config, backend) {
 					signal.throwIfAborted();
 					let client = clients.get(agent);
 					let created = false;
-					if ("appHandle" in request.params && !client) throw new NativeError("APP_ACCESS_REQUIRED", "Select the application with getApp before reading or controlling it");
+					if ("appHandle" in request.params && !client) throw new NativeError("STALE_APP", "Select the application with getApp before reading or controlling it");
 					if (!client || client.disposed && !("appHandle" in request.params)) {
 						try {
 							client = new NativeClient(ctx, native, backend.createChannel, (message) => {
 								ctx.logger.debug(message);
 							}, (code) => {
 								if (!lifetime.signal.aborted && !owner.signal.aborted && clients.get(agent) === client) backend.onConnectionFailure?.(agent, code);
+							}, (event) => {
+								if (!lifetime.signal.aborted && !owner.signal.aborted && clients.get(agent) === client) backend.onVisual?.(agent, event);
 							});
 						} catch (error) {
 							try { backend.onConnectionFailure?.(agent, "NATIVE_START_FAILED"); } catch {}
@@ -1267,4 +1072,4 @@ var cua = connectCua(() => tools.cua, text => console.log(text));`
 	}, "dsh-cua.runtime");
 }
 //#endregion
-export { CuaConfig, NativeError, installCua };
+export { CuaConfig, NativeClient, NativeError, installCua };

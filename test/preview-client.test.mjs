@@ -12,10 +12,11 @@ test('real preview component switches, expands, closes and reports a failed clos
   const source = (await readFile(new URL('../packages/perse-cua/client/index.jsx', import.meta.url), 'utf8'))
     .replace("import React, { useEffect, useRef, useState } from 'react'", 'const React = globalThis.__previewReact; const { useEffect, useRef, useState } = React')
     .replace("import remote from '../lib/typert.remote-client.js'", 'const remote = {}')
+    .replace("import theme from '../cursor-theme.json'", `const theme = ${await readFile(new URL('../packages/perse-cua/cursor-theme.json', import.meta.url), 'utf8')}`)
   const client = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`)
   const fixture = createPreviewFixture(() => 'data:image/png;base64,AAAA')
   let View, cleanup
-  const child = { remote: { perseCuaView: fixture }, on: () => () => {}, slots: { inject: (_name, fn) => fn(), register: (_options, view) => { View = view; return () => {} } } }
+  const child = { remote: { perseCuaView: fixture }, on: () => () => {}, slots: { inject: (_name, fn) => fn(), register: (options, view) => { if (options.id === 'perse-cua.driving') View = view; return () => {} } } }
   const ctx = {
     locale: { register: () => () => {} },
     effect(fn) { const value = fn(); if (!value?.next) return value; const disposers = [...value].filter(x => typeof x === 'function'); cleanup = async () => { for (const dispose of disposers.reverse()) await dispose() }; return cleanup },
@@ -94,7 +95,8 @@ test('preview immediately clears removed frames during action animation and reta
   globalThis.__previewReact = React
   const source = (await readFile(new URL('../packages/perse-cua/client/index.jsx', import.meta.url), 'utf8'))
     .replace("import React, { useEffect, useRef, useState } from 'react'", 'const React = globalThis.__previewReact; const { useEffect, useRef, useState } = React')
-    .replace("import remote from '../lib/typert.remote-client.js'", 'const remote = {}') + '\nexport { PreviewImage }\n'
+    .replace("import remote from '../lib/typert.remote-client.js'", 'const remote = {}')
+    .replace("import theme from '../cursor-theme.json'", `const theme = ${await readFile(new URL('../packages/perse-cua/cursor-theme.json', import.meta.url), 'utf8')}`) + '\nexport { PreviewImage }\n'
   const { PreviewImage } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`)
   const original = { id: 'a/app/1', title: 'One', action: 'click', image: 'data:image/png;base64,AAAA', point: { x: .2, y: .3 } }
   const element = item => React.createElement(PreviewImage, { key: item.id, item, selected: false, t: key => key, toggle() {} })
@@ -103,7 +105,7 @@ test('preview immediately clears removed frames during action animation and reta
     await act(async () => { root = TestRenderer.create(element(original)) })
     assert.equal(root.root.findByType('img').props.src, original.image)
     await act(async () => { root.update(element({ ...original, point: undefined, image: 'data:image/png;base64,BBBB' })) })
-    assert.equal(root.root.findByType('img').props.src, original.image, 'normal frame transition should retain the animation frame')
+    assert.equal(root.root.findByType('img').props.src, 'data:image/png;base64,BBBB', 'screenshots refresh independently of cursor feedback')
     await act(async () => { root.update(element({ id: original.id, title: 'One', action: 'click', previewUnavailable: true })) })
     assert.equal(root.root.findAllByType('img').length, 0, 'permission failure must clear the frame immediately')
     assert.deepEqual(root.root.findAll(node => node.props.style?.placeItems === 'center')[0].children, ['unavailable'])
@@ -117,4 +119,29 @@ test('preview immediately clears removed frames during action animation and reta
     await act(async () => { root.update(element(other)) })
     assert.equal(root.root.findByType('img').props.src, other.image)
   } finally { if (root) await act(async () => root.unmount()); delete globalThis.__previewReact }
+})
+
+test('reduced-motion preference places the cursor at its final point with a brief static click cue', async () => {
+  const previousWindow = globalThis.window
+  globalThis.window = { matchMedia: () => ({ matches: true, addEventListener() {}, removeEventListener() {} }) }
+  globalThis.__previewReact = React
+  const source = (await readFile(new URL('../packages/perse-cua/client/index.jsx', import.meta.url), 'utf8'))
+    .replace("import React, { useEffect, useRef, useState } from 'react'", 'const React = globalThis.__previewReact; const { useEffect, useRef, useState } = React')
+    .replace("import remote from '../lib/typert.remote-client.js'", 'const remote = {}')
+    .replace("import theme from '../cursor-theme.json'", `const theme = ${await readFile(new URL('../packages/perse-cua/cursor-theme.json', import.meta.url), 'utf8')}`) + '\nexport { Cursor }\n'
+  const { Cursor } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`)
+  const motion = { sequence: 1, color: '#5EC0E8', phase: 'click', elapsedMs: 0, clickElapsedMs: 0, trajectory: { samples: [{ t: 0, x: .1, y: .2, angle: 0 }, { t: .5, x: .8, y: .9, angle: 0 }], arrivalT: .5 } }
+  let root
+  try {
+    await act(async () => { root = TestRenderer.create(React.createElement(Cursor, { motion, t: key => key })) })
+    const marker = root.root.findByProps({ className: 'cua-click-point' })
+    assert.equal(marker.props.style.left, '80%')
+    assert.equal(marker.props.style.top, '90%')
+    assert.equal(root.root.findByType('svg').props.style.transform, 'rotate(0rad) scale(0.93)')
+    assert.equal(root.root.findAllByType('path').length, 15, 'click cue remains visible without animation')
+  } finally {
+    if (root) await act(async () => root.unmount())
+    delete globalThis.__previewReact
+    if (previousWindow === undefined) delete globalThis.window; else globalThis.window = previousWindow
+  }
 })

@@ -13,7 +13,7 @@
     {
       "local": "Sources/CuaNative/WindowPointerInput.swift",
       "upstream": "libs/cua-driver/rust/crates/platform-macos/src/input/mouse.rs",
-      "changes": "Reimplement the exposed window-directed click, drag and line-scroll paths in Swift. Preserve routing fields and gesture timing, post each event once, and release this operation’s held button on cooperative cancellation. Preserve fractional movement delays for short or unevenly divided drags. Support middle-button and modifier-bearing clicks and configurable-button drags. Add unpressed hover with no cursor restoration and omit off-window priming clicks so revealed controls remain interactive."
+      "changes": "Reimplement the exposed window-directed click, drag and line-scroll paths in Swift. Preserve routing fields and gesture timing, post each event once, and release this operation\u2019s held button on cooperative cancellation. Preserve fractional movement delays for short or unevenly divided drags. Support middle-button and modifier-bearing clicks and configurable-button drags. Add unpressed hover with no cursor restoration and omit off-window priming clicks so revealed controls remain interactive."
     },
     {
       "local": "Sources/CuaNative/PIDEventPoster.swift",
@@ -62,6 +62,11 @@
       "repository": "https://github.com/steipete/Peekaboo",
       "commit": "d58100100123a2ab63376e86e2b78f9f81aac61e",
       "use": "Cross-check Swift C function signatures and public CoreGraphics calls; no implementation code copied."
+    },
+    {
+      "repository": "https://github.com/trycua/cua",
+      "commit": "85e2b1318bd77ccf3cfa88ccdf875a4bb7eaed19",
+      "use": "Adapt the default cursor theme and SignatureArc Steady trajectory to Swift and Web. MIT license: LICENSE.cua-driver."
     }
   ]
 }

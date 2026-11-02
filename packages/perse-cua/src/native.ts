@@ -21,8 +21,8 @@ export function resolveHelper(config: Config): string {
   return helperPath
 }
 
-/** Mount the original provider in this loader entry, preserving its consent namespace. */
-export async function apply(ctx: Context, config: Config, hooks: Hooks = { onClient() {}, onRevoke() {} }): Promise<void> {
+/** Mount the original provider in this loader entry, using the native helper. */
+export async function apply(ctx: Context, config: Config, hooks: Hooks = {}): Promise<void> {
   const helperPath = resolveHelper(config)
   await applyPatched(ctx, { ...config, helperPath }, hooks)
 }

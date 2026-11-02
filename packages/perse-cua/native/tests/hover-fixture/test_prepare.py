@@ -75,5 +75,45 @@ class FixturePreparationTests(unittest.TestCase):
             self.assertEqual(victim.read_bytes(), b'old')
 
 
+    def test_visual_frames_require_negotiation_matching_identity_and_order(self):
+        request = {'id': '1', 'method': 'click', 'params': {'appHandle': 'app'}}
+        frame = {'type': 'visual', 'requestId': '1', 'appHandle': 'app', 'windowId': 7,
+                 'sequence': 1, 'phase': 'move'}
+        old = runner.VisualFrames(False)
+        old.register(request)
+        with self.assertRaises(AssertionError):
+            old.observe(frame, '1')
+        validator = runner.VisualFrames(True)
+        validator.window_id = 7
+        validator.register(request)
+        self.assertTrue(validator.observe(frame, '1'))
+        with self.assertRaises(AssertionError):
+            validator.observe(frame, '1')
+        with self.assertRaises(AssertionError):
+            validator.require('1', ('move', 'click'))
+        with self.assertRaises(AssertionError):
+            validator.observe({**frame, 'sequence': 2, 'windowId': 8}, '1')
+        with self.assertRaises(AssertionError):
+            validator.observe({**frame, 'sequence': 2, 'appHandle': 'other'}, '1')
+        with self.assertRaises(AssertionError):
+            validator.observe({**frame, 'sequence': 2, 'requestId': 'unknown'}, '1')
+        self.assertTrue(validator.observe({**frame, 'sequence': 2, 'phase': 'click'}, '1'))
+        validator.require('1', ('move', 'click'))
+        validator.register({'id': '2', 'method': 'getState', 'params': {'appHandle': 'app'}})
+        self.assertTrue(validator.observe({**frame, 'sequence': 3, 'phase': 'clear'}, '2'))
+        with self.assertRaises(AssertionError):
+            validator.observe({**frame, 'sequence': 4}, '2')
+
+    def test_visual_phases_must_arrive_in_order(self):
+        validator = runner.VisualFrames(True)
+        validator.window_id = 7
+        validator.register({'id': '1', 'params': {'appHandle': 'app'}})
+        base = {'type': 'visual', 'requestId': '1', 'appHandle': 'app', 'windowId': 7}
+        validator.observe({**base, 'sequence': 1, 'phase': 'click'}, '1')
+        validator.observe({**base, 'sequence': 2, 'phase': 'move'}, '1')
+        with self.assertRaises(AssertionError):
+            validator.require('1', ('move', 'click'))
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -90,7 +90,7 @@ actor AXWorker {
     private let textEventInterval: Double
     private let didPostPosition: @Sendable (WindowRoute, CGPoint) -> Void
     private let didPostClick: @Sendable (WindowRoute, CGPoint) -> Void
-    private let planPointer: @Sendable (WindowRoute, WindowPoint) async throws -> Void
+    private let planPointer: @Sendable (WindowRoute, WindowPoint, CGSize?) async throws -> Void
     private var access: AXAccess?
     private var keyboard: KeyboardInput?
     private var pointer: WindowPointerInput?
@@ -100,7 +100,7 @@ actor AXWorker {
     init(cancellation: CancellationLatch, axTimeout: Float, textEventInterval: Double,
          didPostPosition: @escaping @Sendable (WindowRoute, CGPoint) -> Void = { _, _ in },
          didPostClick: @escaping @Sendable (WindowRoute, CGPoint) -> Void = { _, _ in },
-         planPointer: @escaping @Sendable (WindowRoute, WindowPoint) async throws -> Void = { _, _ in }) {
+         planPointer: @escaping @Sendable (WindowRoute, WindowPoint, CGSize?) async throws -> Void = { _, _, _ in }) {
         self.cancellation = cancellation
         self.axTimeout = axTimeout
         self.textEventInterval = textEventInterval
@@ -128,10 +128,10 @@ actor AXWorker {
         keyboard = key; pointer = mouse
         return (key, mouse)
     }
-    private func prepare(_ route: WindowRoute, point: WindowPoint) async throws {
+    private func prepare(_ route: WindowRoute, point: WindowPoint, targetSize: CGSize? = nil) async throws {
         try WindowPointerInput.validate(point, in: route)
         let latch = cancellation
-        do { try await preparePointer(route: route, point: point, plan: planPointer) { route in
+        do { try await preparePointer(route: route, point: point, targetSize: targetSize, plan: planPointer) { route in
             try latch.check()
             try NativePlatform.requireUnlocked(NativePlatform.sessionLocked())
             try NativePlatform.requireAccessibility()
@@ -143,6 +143,32 @@ actor AXWorker {
         } } catch { try cancellation.check(); throw error }
         try cancellation.check()
         guard !closed else { throw NativeFailure(code: "NATIVE_CLOSED", message: "Helper is closing") }
+    }
+    private func validateInputRoute(_ route: WindowRoute) throws {
+        try cancellation.check()
+        guard !closed else { throw NativeFailure(code: "NATIVE_CLOSED", message: "Helper is closing") }
+        try NativePlatform.requireUnlocked(observeSession())
+        try NativePlatform.requireAccessibility()
+        try NativePlatform.verify(route.owner)
+        let current = try NativePlatform.ownedWindow(route.owner.pid, route.windowID)
+        guard current.bounds == route.bounds else {
+            throw NativeFailure(code: "WINDOW_CHANGED", message: "Window moved or resized before input; read fresh state")
+        }
+    }
+    private func visualTarget(_ handle: String, _ params: RequestParameters, identity: ProcessIdentity) throws -> AXClickVisualTarget {
+        guard try validateIdentity(handle) == identity else {
+            throw NativeFailure(code: "STALE_APP", message: "Application identity changed; acquire a fresh handle")
+        }
+        let selected = try element(handle, params)
+        guard let bounds = try ax().bounds(selected), bounds.width > 0, bounds.height > 0 else {
+            throw NativeFailure(code: "CURSOR_UNAVAILABLE", message: "Accessibility target has no usable cursor position; read fresh state")
+        }
+        let window = try ax().enclosingWindow(selected, owner: identity)
+        let route = WindowRoute(owner: identity, windowID: window.windowID, bounds: window.bounds)
+        let point = WindowPointerInput.elementPoint(bounds, in: route)
+        try WindowPointerInput.validate(point, in: route)
+        try validateInputRoute(route)
+        return AXClickVisualTarget(route: route, point: point, elementBounds: bounds)
     }
     private func observeSession() -> Bool? {
         let state = NativePlatform.sessionLocked()
@@ -413,9 +439,11 @@ actor AXWorker {
             let count = params.contains("clickCount") ? try params.integer("clickCount", in: 1...2) : 1
             guard button == "left" || (["right", "middle"].contains(button) && count == 1) else { throw RequestParameters.invalid("Unsupported mouse button or click count") }
             let modifiers = try params.modifiers()
+            _ = try KeyboardInput.modifierFlags(modifiers)
             let window: WindowInfo
             let point: WindowPoint
             var hoverElement: AXUIElement?
+            var elementBounds: WindowBounds?
             if params.contains("elementIndex") {
                 guard !params.contains("x"), !params.contains("y"), !params.contains("windowId") else { throw RequestParameters.invalid("Element and coordinate targets cannot be combined") }
                 let selected = try element(handle, params)
@@ -426,21 +454,22 @@ actor AXWorker {
                         : (button == "left" && count == 1 ? (names.contains("AXPress") ? "AXPress" : names.contains("AXPick") ? "AXPick" : nil) : nil)
                     if let action {
                         try await performAXClick(resolve: {
-                            // Keep AX references inside this actor's synchronous callback.
-                            guard let selected = try? self.element(handle, params),
-                                  let bounds = try? self.ax().bounds(selected), bounds.width > 0, bounds.height > 0,
-                                  let ownerWindow = try? self.ax().enclosingWindow(selected, owner: identity) else { return nil }
-                            let route = WindowRoute(owner: identity, windowID: ownerWindow.windowID, bounds: ownerWindow.bounds)
-                            let point = WindowPointerInput.elementPoint(bounds, in: route)
-                            guard (try? WindowPointerInput.validate(point, in: route)) != nil else { return nil }
-                            return AXClickVisualTarget(route: route, point: point)
+                            let target = try self.visualTarget(handle, params, identity: identity)
+                            let selected = try self.element(handle, params)
+                            try self.ax().requireEnabled(selected)
+                            guard try self.ax().actions(selected).contains(action) else {
+                                throw NativeFailure(code: "STALE_SNAPSHOT", message: "Accessibility action changed; read fresh state")
+                            }
+                            return target
                         }, plan: self.planPointer, checkCancellation: { try self.cancellation.check() },
+                           sameTarget: { CFEqual(selected, try self.element(handle, params)) },
                            perform: { try self.ax().perform(self.element(handle, params), action) }, mark: self.didPostClick)
                         return .result(Self.actionResult)
                     }
                     try ax().requireEnabled(selected)
                 }
                 guard let bounds = try ax().bounds(selected), bounds.width > 0, bounds.height > 0 else { throw NativeFailure(code: "NATIVE_ERROR", message: "Element has no pointer bounds") }
+                elementBounds = bounds
                 window = try ax().enclosingWindow(selected, owner: identity)
                 point = WindowPointerInput.elementPoint(bounds, in: WindowRoute(owner: identity, windowID: window.windowID, bounds: window.bounds))
             } else {
@@ -456,11 +485,46 @@ actor AXWorker {
                     hoverElement = try ax().element(at: CGPoint(x: window.bounds.x + point.x, y: window.bounds.y + point.y), owner: identity)
                     if let hit = hoverElement, try ax().windowID(hit) != window.windowID { hoverElement = nil }
                 }
+                let initialElement = hoverElement
+                try await prepare(route, point: point, targetSize: elementBounds.map { CGSize(width: $0.width, height: $0.height) })
+                try validateInputRoute(route)
+                if params.contains("elementIndex") {
+                    let current = try visualTarget(handle, params, identity: identity)
+                    guard current.route == route, current.point == point, current.elementBounds == elementBounds else {
+                        throw NativeFailure(code: "WINDOW_CHANGED", message: "Accessibility target moved before hover; read fresh state")
+                    }
+                    let currentElement = try element(handle, params)
+                    guard let initialElement, CFEqual(initialElement, currentElement) else {
+                        throw NativeFailure(code: "STALE_SNAPSHOT", message: "Accessibility target changed before hover; read fresh state")
+                    }
+                    hoverElement = currentElement
+                } else {
+                    try coordinateSnapshot(handle, params, window.windowID)
+                    hoverElement = try ax().element(at: CGPoint(x: route.bounds.x + point.x, y: route.bounds.y + point.y), owner: identity)
+                    if let hit = hoverElement, try ax().windowID(hit) != route.windowID { hoverElement = nil }
+                    guard (initialElement == nil && hoverElement == nil) ||
+                          (initialElement != nil && hoverElement != nil && CFEqual(initialElement, hoverElement)) else {
+                        throw NativeFailure(code: "STALE_SNAPSHOT", message: "Hover target changed; read fresh state")
+                    }
+                }
+                try cancellation.check()
                 let hover = hovers[handle] ?? AXHover()
                 hovers[handle] = hover
                 return try Self.hoverOutcome(route: route, point: point) { try hover.move(to: hoverElement, in: route, access: ax()) }
             }
-            try await prepare(route, point: point)
+            try await prepare(route, point: point, targetSize: elementBounds.map { CGSize(width: $0.width, height: $0.height) })
+            if params.contains("elementIndex") {
+                let current = try visualTarget(handle, params, identity: identity)
+                guard current.route == route, current.point == point, current.elementBounds == elementBounds else {
+                    throw NativeFailure(code: "WINDOW_CHANGED", message: "Accessibility target moved before click; read fresh state")
+                }
+                let currentElement = try element(handle, params)
+                guard let hoverElement, CFEqual(hoverElement, currentElement) else {
+                    throw NativeFailure(code: "STALE_SNAPSHOT", message: "Accessibility target changed before click; read fresh state")
+                }
+                try ax().requireEnabled(currentElement)
+            } else { try coordinateSnapshot(handle, params, window.windowID) }
+            try cancellation.check()
             try inputs().1.click(in: route, at: point, button: button, count: count, modifiers: modifiers)
         case "scroll", "drag":
             let id = try params.windowID()

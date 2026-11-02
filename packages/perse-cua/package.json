@@ -41,6 +41,7 @@
   "files": [
     "lib/index.js",
     "lib/native.js",
+    "cursor-theme.json",
     "native/bin/**",
     "native/Sources/**",
     "native/Package.swift",

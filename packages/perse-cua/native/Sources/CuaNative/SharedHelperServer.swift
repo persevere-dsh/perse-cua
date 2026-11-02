@@ -156,7 +156,9 @@ final class NativeSignals {
         guard !lifetime.isStopping else { channel.shutdown(); disconnected(id); return }
         lifetime.configure(id, grace: configuration.shutdownGraceSeconds)
         let writer = JSONLWriter(limit: configuration.maxResponseBytes, channel: channel, writeTimeout: configuration.shutdownGraceSeconds)
-        do { try await writer.write(options.ready(pid: getpid(), instanceID: instanceID)) }
+        var ready = options.ready(pid: getpid(), instanceID: instanceID).object!
+        if configuration.visualEvents { ready["capabilities"] = .array([.string("visual-v1")]) }
+        do { try await writer.write(.object(ready)) }
         catch { channel.shutdown(); disconnected(id); return }
         let lifetime = self.lifetime
         let coordinator = RequestCoordinator(configuration: configuration, capture: capture, channel: channel, cancellation: cancellation,

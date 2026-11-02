@@ -24,6 +24,12 @@ import Darwin
     private var stopping = false
     private var requestControl: NativeRequestControl?
     private var activeRequestID: String?
+    private var activeAppHandle: String?
+    private var activeMethod: String?
+    private var visualSequence: UInt64 = 0
+    private var lastPositionEvent = 0.0
+    private var pendingPosition: (WindowRoute, CGPoint, Double)?
+    private var visibleOwner: (route: WindowRoute, requestID: String, handle: String)?
     private var replying = false
     private var nextFrame: Data?
     private var nextCancelled = false
@@ -40,17 +46,70 @@ import Darwin
         self.onClose = onClose
         self.onFatal = onFatal
         let cursor = DispatchCursor()
+        cursor.setSessionName(configuration.cursorSessionName)
         self.cursor = cursor
         worker = AXWorker(cancellation: cancellation, axTimeout: configuration.axTimeoutSeconds,
                           textEventInterval: configuration.textEventIntervalSeconds, didPostPosition: { route, point in
             DispatchQueue.main.sync { cursor.show(route, point: point) }
         }, didPostClick: { route, point in
             DispatchQueue.main.sync { cursor.show(route, point: point, clicked: true) }
-        }, planPointer: { route, point in
-            try await cursor.plan(route, point: point)
+        }, planPointer: { route, point, size in
+            try await cursor.plan(route, point: point, targetSize: size ?? CGSize(width: 24, height: 24))
         })
         input = JSONLInput(limit: configuration.maxRequestBytes, cancellation: cancellation, channel: channel)
         self.writer = writer
+        cursor.onPlan = { [weak self] route, trajectory in
+            guard let self else { return }
+            if let requestID = self.activeRequestID, let handle = self.activeAppHandle {
+                self.visibleOwner = (route, requestID, handle)
+            }
+            self.visual(route, phase: "move", samples: trajectory.samples, arrival: trajectory.arrivalT)
+        }
+        cursor.onClick = { [weak self] route, point, angle in
+            self?.flushPosition()
+            self?.visual(route, phase: "click", samples: [CursorMotionSample(t: 0, point: point, angle: angle)], arrival: 0)
+        }
+        cursor.onPosition = { [weak self] route, point, angle in
+            guard let self, self.configuration.visualEvents, self.activeMethod == "drag" else { return }
+            self.pendingPosition = (route, point, angle)
+            if ProcessInfo.processInfo.systemUptime - self.lastPositionEvent >= 0.05 { self.flushPosition() }
+        }
+        cursor.onInvalid = { [weak self] route in
+            guard let self, let owner = self.visibleOwner, owner.route == route else { return }
+            self.visibleOwner = nil
+            self.visual(route, phase: "clear", samples: [CursorMotionSample(t: 0, point: .zero, angle: 0)], arrival: 0,
+                        requestID: owner.requestID, handle: owner.handle)
+        }
+    }
+
+    private func flushPosition() {
+        guard let (route, point, angle) = pendingPosition else { return }
+        pendingPosition = nil
+        lastPositionEvent = ProcessInfo.processInfo.systemUptime
+        visual(route, phase: "position", samples: [CursorMotionSample(t: 0, point: point, angle: angle)], arrival: 0)
+    }
+
+    private func visual(_ route: WindowRoute, phase: String, samples: [CursorMotionSample], arrival: Double,
+                        requestID: String? = nil, handle: String? = nil) {
+        guard configuration.visualEvents, let requestID = requestID ?? activeRequestID, let handle = handle ?? activeAppHandle,
+              route.bounds.width > 0, route.bounds.height > 0 else { return }
+        visualSequence &+= 1
+        let values: [JSONValue] = samples.map { sample in
+            .object(["t": .number(sample.t),
+                     "x": .number((sample.point.x - route.bounds.x) / route.bounds.width),
+                     "y": .number((sample.point.y - route.bounds.y) / route.bounds.height),
+                     "angle": .number(sample.angle)])
+        }
+        let started = ProcessInfo.processInfo.systemUptime
+        writer.visual(.object([
+            "type": .string("visual"), "requestId": .string(requestID), "appHandle": .string(handle),
+            "windowId": .number(Double(route.windowID)), "sequence": .number(Double(visualSequence)),
+            "process": .object(["pid": .number(Double(route.owner.pid)),
+                                "startedSeconds": .number(Double(route.owner.startedSeconds)),
+                                "startedMicroseconds": .number(Double(route.owner.startedMicroseconds))]),
+            "geometry": route.bounds.json, "phase": .string(phase), "elapsedMs": .number(0), "color": .string(cursor.colorHex),
+            "trajectory": .object(["samples": .array(values), "arrivalT": .number(arrival)]),
+        ]), started: started)
     }
     func start() {
         let latch = cancellation
@@ -78,6 +137,10 @@ import Darwin
         active = token
         let parsed = try? NativeRequest(data: data)
         activeRequestID = parsed?.id
+        activeAppHandle = parsed?.params["appHandle"].string
+        activeMethod = parsed?.method
+        pendingPosition = nil
+        lastPositionEvent = 0
         let control = NativeRequestControl()
         requestControl = control
         let trace: ScreenshotTrace?
@@ -108,7 +171,10 @@ import Darwin
             do {
                 let request = try NativeRequest(data: data)
                 requestID = .string(request.id)
-                cursorRequest = self.cursorRequests.begin(method: request.method) { self.cursor.hide() }
+                cursorRequest = self.cursorRequests.begin(method: request.method) {
+                    self.cursor.invalidateRouteMonitor()
+                    self.cursor.cancelMovement()
+                }
                 if request.method == "screenshot" { try self.capture.requireAvailable() }
                 let result = try await self.scheduler.perform(cancellation: self.cancellation) {
                     control.startOperation()
@@ -130,6 +196,7 @@ import Darwin
             }
             control.finishOperation()
             guard !self.stopping, self.active == token else { return }
+            self.flushPosition()
             self.replying = true
             do { try await self.writer.write(response, trace: trace) }
             catch let failure as NativeFailure {
@@ -149,6 +216,8 @@ import Darwin
             self.deadline = nil
             self.active = nil
             self.activeRequestID = nil
+            self.activeAppHandle = nil
+            self.activeMethod = nil
             self.requestControl = nil
             self.operation = nil
             self.replying = false
@@ -164,6 +233,7 @@ import Darwin
     }
 
     private func cancelRequest(_ failure: NativeFailure) {
+        cursor.cancelMovement()
         let grace = configuration.shutdownGraceSeconds
         let onFatal = self.onFatal
         let channel = self.channel

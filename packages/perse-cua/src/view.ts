@@ -20,6 +20,8 @@ export interface PreviewWindow {
   discoveryUnavailable?: boolean
   /** The target was absent or off-screen in the latest window enumeration. */
   windowUnavailable?: boolean
+  /** Native cursor trajectory, with elapsed time relative to its start. */
+  motion?: { sequence: number; color: string; trajectory: { samples: Array<{ t: number; x: number; y: number; angle: number }>; arrivalT: number }; elapsedMs: number; clickElapsedMs?: number; phase: 'move' | 'click' | 'position' }
   /** Action point normalized to the image on this item. */
   point?: { x: number; y: number }
 }
@@ -28,6 +30,7 @@ export interface PreviewWindow {
 export class PreviewService extends TypertRemoteService {
   private readonly windows = new Map<string, PreviewWindow>()
   private readonly listeners = new Set<(item?: PreviewWindow, invalidatedId?: string, freshPoint?: boolean) => void>()
+  private readonly motionAnchors = new Map<string, { sequence: number; elapsedMs: number; at: number }>()
   private closed = false
   private onDismiss?: (id: string) => void
   private onWatch?: (sessionId: string, active: boolean) => void
@@ -35,17 +38,22 @@ export class PreviewService extends TypertRemoteService {
   constructor(ctx: Context) { super(ctx, 'perseCuaView') }
   setWatchHandler(fn: (sessionId: string, active: boolean) => void): void { this.onWatch = fn }
   setDismissHandler(fn: (id: string) => void): void { this.onDismiss = fn }
-  put(item: PreviewWindow, freshPoint: boolean = false): void { if (!this.closed) { this.windows.set(item.id, item); this.emit(item, undefined, freshPoint) } }
-  remove(id: string): void { if (this.windows.delete(id)) this.emit(undefined, id) }
+  put(item: PreviewWindow, freshPoint: boolean = false): void { if (!this.closed) {
+    if (item.motion) { const previous = this.motionAnchors.get(item.id); if (!previous || previous.sequence !== item.motion.sequence) this.motionAnchors.set(item.id, { sequence: item.motion.sequence, elapsedMs: item.motion.elapsedMs, at: performance.now() }) }
+    else this.motionAnchors.delete(item.id)
+    this.windows.set(item.id, item); this.emit(item, undefined, freshPoint)
+  } }
+  remove(id: string): void { this.motionAnchors.delete(id); if (this.windows.delete(id)) this.emit(undefined, id) }
   /** Discard undelivered click feedback for a window whose geometry or visibility changed. */
   invalidatePoint(id: string): void {
     const item = this.windows.get(id)
-    if (item?.point) { const { point: _point, ...rest } = item; this.windows.set(id, rest) }
+    if (item?.point || item?.motion) { const { point: _point, motion: _motion, ...rest } = item; this.windows.set(id, rest) }
+    this.motionAnchors.delete(id)
     this.emit(undefined, id)
   }
   @Remote({ name: 'dismiss', resources: { session: (sessionId: string) => sessionId as SessionId } })
   dismiss(sessionId: string, id: string): void { if (!id.startsWith(`${encodeURIComponent(sessionId)}/`)) return; this.onDismiss?.(id); this.remove(id) }
-  close(): void { this.closed = true; for (const id of this.windows.keys()) this.emit(undefined, id); this.windows.clear(); this.emit() }
+  close(): void { this.closed = true; for (const id of this.windows.keys()) this.emit(undefined, id); this.windows.clear(); this.motionAnchors.clear(); this.emit() }
   private emit(item?: PreviewWindow, invalidatedId?: string, freshPoint = false): void { for (const listener of this.listeners) listener(item, invalidatedId, freshPoint) }
   /** Stream current previews and subsequent changes. */
   @Remote({ mode: 'stream', resources: { session: (sessionId: string) => sessionId as SessionId } })
@@ -80,9 +88,12 @@ export class PreviewService extends TypertRemoteService {
           clearPending(id)
           if (Date.now() >= entry.expiresAt) continue
           const index = items.findIndex(item => item.id === id)
-          if (index >= 0) { items[index] = entry.item; dirty = true }
+          if (index >= 0 && entry.item.point) { items[index] = { ...items[index]!, point: entry.item.point }; dirty = true }
         }
-        yield items
+        yield items.map(item => {
+          const anchor = this.motionAnchors.get(item.id)
+          return item.motion && anchor && anchor.sequence === item.motion.sequence ? { ...item, motion: { ...item.motion, elapsedMs: anchor.elapsedMs + Math.max(0, performance.now() - anchor.at), ...(item.motion.clickElapsedMs === undefined ? {} : { clickElapsedMs: item.motion.clickElapsedMs + Math.max(0, performance.now() - anchor.at) }) } } : item
+        })
       }
     } finally { clearAll(); this.onWatch?.(sessionId, false); this.listeners.delete(notify); signal.removeEventListener('abort', abort) }
   }

@@ -52,6 +52,9 @@ enum SharedHelperProxy {
         try channel.write(data + Data([10]), timeout: configuration.timeoutSeconds)
         while let frame = try frames.next(timeout: configuration.timeoutSeconds) {
             if try diagnostic(frame) { continue }
+            guard try JSONDecoder().decode(JSONValue.self, from: frame)["type"] != .string("visual") else {
+                throw NativeFailure(code: "NATIVE_PROTOCOL", message: "Unnegotiated visual event on stdio client")
+            }
             try FileHandle.standardOutput.write(contentsOf: frame + Data([10]))
             return
         }

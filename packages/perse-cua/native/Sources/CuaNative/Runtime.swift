@@ -22,6 +22,8 @@ struct HelperConfiguration: Sendable {
     var textEventIntervalSeconds: Double = 0.00025
     var timeoutSeconds: Double = 30
     var screenshotTimeoutSeconds: Double = 5
+    var visualEvents = false
+    var cursorSessionName: String?
     init(arguments: [String]) throws {
         var index = 0
         while index < arguments.count {
@@ -55,7 +57,8 @@ struct HelperConfiguration: Sendable {
 
     init(hello: Data, runtimeKey: String) throws {
         let decoded = try JSONDecoder().decode(JSONValue.self, from: hello)
-        guard let fields = decoded.object, Set(fields.keys) == ["type", "protocol", "runtimeKey", "config"],
+        guard let fields = decoded.object,
+              Set(fields.keys).subtracting(["capabilities", "sessionName"]) == ["type", "protocol", "runtimeKey", "config"],
               fields["type"] == .string("hello"), fields["protocol"] == .number(1),
               fields["runtimeKey"] == .string(runtimeKey), let config = fields["config"]?.object,
               Set(config.keys) == ["maxRequestBytes", "maxResponseBytes", "axTimeoutMs", "textEventIntervalMs", "screenshotTimeoutMs", "timeoutMs", "graceMs"] else {
@@ -75,6 +78,18 @@ struct HelperConfiguration: Sendable {
             "--screenshot-timeout-ms", number("screenshotTimeoutMs"), "--timeout-ms", number("timeoutMs"),
             "--shutdown-grace-ms", number("graceMs"),
         ])
+        if let capabilities = fields["capabilities"] {
+            guard case .array(let values) = capabilities, values.allSatisfy({ $0.string != nil }) else {
+                throw NativeFailure(code: "NATIVE_PROTOCOL", message: "Shared helper capabilities must be an array of strings")
+            }
+            visualEvents = values.contains(.string("visual-v1"))
+        }
+        if let sessionName = fields["sessionName"] {
+            guard visualEvents, let name = sessionName.string, name.utf8.count <= 256 else {
+                throw NativeFailure(code: "NATIVE_PROTOCOL", message: "Cursor session name requires visual-v1 and at most 256 UTF-8 bytes")
+            }
+            cursorSessionName = name
+        }
     }
 }
 
@@ -129,8 +144,20 @@ final class JSONLWriter: Sendable {
 
     func diagnostic(_ value: JSONValue) {
         queue.async { [self] in
-            // The operation reply owns transport failures; diagnostics remain best effort.
-            try? send(value)
+            // A partial frame cannot be followed safely by another JSONL message.
+            do { try send(value) }
+            catch let failure as NativeFailure where failure.code == "NATIVE_RESPONSE_LIMIT" { return }
+            catch { channel.shutdown() }
+        }
+    }
+
+    func visual(_ value: JSONValue, started: Double) {
+        queue.async { [self] in
+            guard var fields = value.object else { return }
+            fields["elapsedMs"] = .number(max(0, (ProcessInfo.processInfo.systemUptime - started) * 1000))
+            do { try send(.object(fields)) }
+            catch let failure as NativeFailure where failure.code == "NATIVE_RESPONSE_LIMIT" { return }
+            catch { channel.shutdown() }
         }
     }
 
@@ -147,20 +174,21 @@ final class JSONLWriter: Sendable {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
             queue.async {
                 do {
-                    func mark(_ stage: String) {
+                    func mark(_ stage: String) throws {
                         guard let trace else { return }
-                        try? self.send(trace.diagnosticValue(stage))
+                        do { try self.send(trace.diagnosticValue(stage)) }
+                        catch let failure as NativeFailure where failure.code == "NATIVE_RESPONSE_LIMIT" { return }
                     }
-                    mark("response.encode.begin")
+                    try mark("response.encode.begin")
                     let encoder = JSONEncoder()
                     encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
                     var frame = try encoder.encode(response)
                     frame.append(10)
                     guard frame.count <= limit else { throw NativeFailure(code: "NATIVE_RESPONSE_LIMIT", message: "Reply exceeded helper byte limit") }
-                    mark("response.encode.end")
-                    mark("response.write.begin")
+                    try mark("response.encode.end")
+                    try mark("response.write.begin")
                     try self.channel.write(frame, timeout: self.writeTimeout)
-                    mark("response.write.end")
+                    try mark("response.write.end")
                     continuation.resume()
                 } catch let error as NativeFailure { continuation.resume(throwing: error) }
                 catch { continuation.resume(throwing: NativeFailure(code: "NATIVE_IO", message: "Encoding or writing helper reply failed")) }

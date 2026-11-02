@@ -13,31 +13,31 @@ private let preparationRoute = WindowRoute(owner: ProcessIdentity(pid: 42, start
     windowID: 7, bounds: WindowBounds(x: 100, y: 50, width: 200, height: 200))
 private let preparationPoint = WindowPoint(x: 10, y: 10)
 
-@Test func preparationRevalidatesBeforeDispatchEvenWhenVisualsAreUnavailable() async throws {
+@Test func preparationValidatesBeforeAndAfterArrival() async throws {
     let trace = PreparationTrace()
-    try await preparePointer(route: preparationRoute, point: preparationPoint, plan: { _, _ in
-        trace.append("no-visual")
+    try await preparePointer(route: preparationRoute, point: preparationPoint, plan: { _, _, _ in
+        trace.append("arrival")
     }, validate: { _ in trace.append("validate") })
     trace.append("dispatch")
-    #expect(trace.read() == ["no-visual", "validate", "dispatch"])
+    #expect(trace.read() == ["validate", "arrival", "validate", "dispatch"])
 }
 
 @Test(arguments: ["WINDOW_CHANGED", "APP_ACCESS_REVOKED"])
 func preparationStopsBeforeDispatchWhenTheTargetOrPermissionChanges(code: String) async {
     let trace = PreparationTrace()
     do {
-        try await preparePointer(route: preparationRoute, point: preparationPoint, plan: { _, _ in
+        try await preparePointer(route: preparationRoute, point: preparationPoint, plan: { _, _, _ in
             trace.append("planned")
         }, validate: { _ in
             trace.append("validate")
-            throw NativeFailure(code: code, message: "changed")
+            if trace.read().contains("planned") { throw NativeFailure(code: code, message: "changed") }
         })
         trace.append("dispatch")
         Issue.record("Changed target or revoked access must stop dispatch")
     } catch {
         #expect((error as? NativeFailure)?.code == code)
     }
-    #expect(trace.read() == ["planned", "validate"])
+    #expect(trace.read() == ["validate", "planned", "validate"])
 }
 
 @Test func cancellationDuringPlanningDoesNotDispatch() async throws {
@@ -45,7 +45,7 @@ func preparationStopsBeforeDispatchWhenTheTargetOrPermissionChanges(code: String
     let (started, notifyStarted) = AsyncStream<Void>.makeStream()
     let (release, notifyRelease) = AsyncStream<Void>.makeStream()
     let operation = Task {
-        try await preparePointer(route: preparationRoute, point: preparationPoint, plan: { _, _ in
+        try await preparePointer(route: preparationRoute, point: preparationPoint, plan: { _, _, _ in
             notifyStarted.yield()
             for await _ in release { try Task.checkCancellation(); return }
             try Task.checkCancellation()
@@ -59,7 +59,7 @@ func preparationStopsBeforeDispatchWhenTheTargetOrPermissionChanges(code: String
     notifyRelease.finish()
     do { try await operation.value; Issue.record("Cancelled plan must not dispatch") } catch {}
     notifyStarted.finish()
-    #expect(trace.read().isEmpty)
+    #expect(trace.read() == ["validate"])
 }
 
 @Test func cancelledAnimationIgnoresLateCompletion() async {
@@ -79,4 +79,38 @@ func preparationStopsBeforeDispatchWhenTheTargetOrPermissionChanges(code: String
         completion.finish(nil)
         completion.finish(CancellationError())
     }
+}
+
+@Test func initialTargetFailurePreventsMovement() async {
+    let trace = PreparationTrace()
+    do {
+        try await preparePointer(route: preparationRoute, point: preparationPoint, plan: { _, _, _ in
+            trace.append("plan")
+        }, validate: { _ in
+            throw NativeFailure(code: "WINDOW_CHANGED", message: "changed")
+        })
+        Issue.record("Invalid target must not start movement")
+    } catch { #expect((error as? NativeFailure)?.code == "WINDOW_CHANGED") }
+    #expect(trace.read().isEmpty)
+}
+
+@Test func cancelledTaskCannotDispatchEvenIfPlanReturnsNormally() async {
+    let trace = PreparationTrace()
+    let (started, notifyStarted) = AsyncStream<Void>.makeStream()
+    let (release, notifyRelease) = AsyncStream<Void>.makeStream()
+    let operation = Task {
+        try await preparePointer(route: preparationRoute, point: preparationPoint, plan: { _, _, _ in
+            notifyStarted.yield()
+            for await _ in release { return }
+        }, validate: { _ in trace.append("validate") })
+        trace.append("dispatch")
+    }
+    var iterator = started.makeAsyncIterator()
+    _ = await iterator.next()
+    operation.cancel()
+    notifyRelease.yield()
+    notifyRelease.finish()
+    do { try await operation.value; Issue.record("Cancelled task must not dispatch") } catch {}
+    notifyStarted.finish()
+    #expect(trace.read() == ["validate"])
 }

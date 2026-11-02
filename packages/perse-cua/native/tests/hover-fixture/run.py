@@ -39,6 +39,47 @@ def stop_owned(process):
             process.wait(timeout=3)
 
 
+class VisualFrames:
+    """Validate negotiated visual frames and retain their request ordering."""
+
+    def __init__(self, enabled):
+        self.enabled = enabled
+        self.last_sequence = 0
+        self.requests = {}
+        self.phases = {}
+        self.window_id = None
+
+    def register(self, request):
+        self.requests[request['id']] = request
+
+    def observe(self, frame, active_request):
+        if frame.get('type') != 'visual':
+            return False
+        if not self.enabled:
+            raise AssertionError('Unnegotiated visual event')
+        request_id = frame.get('requestId')
+        request = self.requests.get(request_id)
+        phase = frame.get('phase')
+        if (request is None or request_id != active_request and phase != 'clear' or
+                phase not in ('move', 'click', 'position', 'clear') or
+                frame.get('appHandle') != request['params'].get('appHandle') or
+                self.window_id is None or frame.get('windowId') != self.window_id):
+            raise AssertionError(f'Visual event does not match its request and window: {frame}')
+        sequence = frame.get('sequence')
+        if type(sequence) is not int or sequence <= self.last_sequence:
+            raise AssertionError(f'Visual event sequence is not increasing: {frame}')
+        self.last_sequence = sequence
+        self.phases.setdefault(request_id, []).append(phase)
+        return True
+
+    def require(self, request_id, required):
+        if not self.enabled:
+            return
+        phases = iter(self.phases.get(request_id, []))
+        if not all(any(phase == expected for phase in phases) for expected in required):
+            raise AssertionError(f'Missing ordered visual phases {required} for request {request_id}')
+
+
 FIXTURE_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>CFBundleExecutable</key><string>fixture</string><key>CFBundleIdentifier</key><string>local.perse.isolated-hover-fixture</string><key>CFBundleName</key><string>Perse isolated hover fixture</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>"""
@@ -115,6 +156,7 @@ def main():
     parser.add_argument('--prepare-only', action='store_true', help='Build and stage identities without starting any GUI or helper')
     parser.add_argument('--allow-desktop-change', action='store_true', help='Explicitly allow a background test window and cursor feedback to change the desktop')
     parser.add_argument('--evidence-file', type=Path, help='Write a new JSONL file with isolated identities, requests, replies and fixture states')
+    parser.add_argument('--visual-events', action='store_true', help='Negotiate and validate visual-v1 events and exercise an unnegotiated connection')
     parser.add_argument('--capture-previews', action='store_true', help='Save display-only fixture window PNGs beside --evidence-file; excludes the independent cursor panel')
     args = parser.parse_args()
     if not args.prepare_only and not args.allow_desktop_change:
@@ -163,22 +205,32 @@ def main():
                 if not line:
                     raise RuntimeError('Helper closed the isolated connection')
                 return json.loads(line)
-            send({'type': 'hello', 'protocol': 1, 'runtimeKey': key, 'config': {
+            send({'type': 'hello', 'protocol': 1, 'runtimeKey': key, **({'capabilities': ['visual-v1']} if args.visual_events else {}), 'config': {
                 'maxRequestBytes': 1048576, 'maxResponseBytes': 33554432, 'axTimeoutMs': 3000,
                 'textEventIntervalMs': 0.25, 'screenshotTimeoutMs': 5000, 'timeoutMs': 15000, 'graceMs': 1000}})
             ready = read()
             record('ready', value=ready)
             assert ready.get('type') == 'ready' and ready.get('runtimeKey') == key and ready.get('pid') == helper_process.pid, ready
+            if args.visual_events:
+                assert 'visual-v1' in ready.get('capabilities', []), ready
+            else:
+                assert 'capabilities' not in ready, ready
+            visuals = VisualFrames(args.visual_events)
             seq = 0
-            def call(method, params, expected_error=None):
+            def call(method, params, expected_error=None, phases=()):
                 nonlocal seq
                 seq += 1
                 request = {'id': str(seq), 'method': method, 'params': params}
                 record('request', value=request)
+                visuals.register(request)
                 send(request)
                 while True:
                     response = read()
                     if response.get('type') == 'diagnostic':
+                        continue
+                    if response.get('type') == 'visual':
+                        record('visual', value=response)
+                        visuals.observe(response, request['id'])
                         continue
                     break
                 assert response.get('id') == str(seq), response
@@ -190,6 +242,7 @@ def main():
                     result['imageBytes'] = len(image)
                     recorded = {**response, 'result': result}
                 record('response', value=recorded)
+                visuals.require(request['id'], phases)
                 if state_path.exists():
                     record('fixture-state', requestId=str(seq), value=json.loads(state_path.read_text()))
                 if expected_error:
@@ -215,6 +268,7 @@ def main():
             owner = {'appHandle': call('getApp', {'selector': str(fixture.pid)})['appHandle']}
             window = wait_for(lambda: next((w for w in call('listWindows', owner)
                 if w['title'] == 'Perse isolated hover fixture'), None), 'fixture window')
+            visuals.window_id = window['windowId']
             scope = {**owner, 'windowId': window['windowId'], 'maxDepth': 20, 'maxElements': 100}
             def capture(label):
                 if not args.capture_previews:
@@ -233,19 +287,66 @@ def main():
                 assert len(matches) == 1, (label, observed['tree'])
                 return {**owner, 'snapshotId': observed['snapshotId'], 'elementIndex': matches[0]['index']}
             capture('initial')
-            result = call('hover', target('Alternate hover'))
+            result = call('hover', target('Alternate hover'), phases=('move',))
             assert result == {'dispatched': True, 'verified': False, 'hoverRoute': 'accessibility', 'systemPointerMoved': False}, result
             wait_for(lambda: json.loads(state_path.read_text())['alternateShown'], 'AX alternate reveal')
             capture('alternate')
-            result = call('hover', target('Alternate child'))
+            result = call('hover', target('Alternate child'), phases=('move',))
             assert result == {'dispatched': False, 'verified': False, 'hoverRoute': 'accessibility', 'systemPointerMoved': False}, result
-            call('click', target('Alternate child'))
+            call('click', target('Alternate child'), phases=('move', 'click'))
             wait_for(lambda: json.loads(state_path.read_text())['clicks'] == 1, 'AX child click')
             before = json.loads(state_path.read_text())
+            if args.visual_events:
+                # A second connection exercises the original handshake and pointer path.
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as legacy:
+                    legacy.settimeout(15)
+                    legacy.connect(str(socket_path))
+                    with legacy.makefile('rwb', buffering=0) as old:
+                        def old_send(value):
+                            old.write(json.dumps(value, separators=(',', ':')).encode() + b'\n')
+                        def old_read():
+                            line = old.readline()
+                            if not line:
+                                raise RuntimeError('Legacy connection closed')
+                            return json.loads(line)
+                        old_send({'type': 'hello', 'protocol': 1, 'runtimeKey': key, 'config': {
+                            'maxRequestBytes': 1048576, 'maxResponseBytes': 33554432, 'axTimeoutMs': 3000,
+                            'textEventIntervalMs': 0.25, 'screenshotTimeoutMs': 5000, 'timeoutMs': 15000, 'graceMs': 1000}})
+                        old_ready = old_read()
+                        record('legacy-ready', value=old_ready)
+                        assert old_ready.get('type') == 'ready' and old_ready.get('pid') == helper_process.pid and 'capabilities' not in old_ready, old_ready
+                        old_visuals = VisualFrames(False)
+                        old_seq = 0
+                        def old_call(method, params, expected_error=None):
+                            nonlocal old_seq
+                            old_seq += 1
+                            request = {'id': str(old_seq), 'method': method, 'params': params}
+                            old_visuals.register(request)
+                            record('legacy-request', value=request)
+                            old_send(request)
+                            while True:
+                                response = old_read()
+                                if response.get('type') == 'diagnostic':
+                                    continue
+                                if response.get('type') == 'visual':
+                                    record('legacy-visual', value=response)
+                                    old_visuals.observe(response, request['id'])
+                                break
+                            assert response.get('id') == request['id'], response
+                            record('legacy-response', value=response)
+                            if expected_error:
+                                assert response.get('error', {}).get('code') == expected_error, response
+                                return None
+                            if 'error' in response:
+                                raise RuntimeError(f'legacy {method}: {response["error"]}')
+                            return response['result']
+                        old_owner = {'appHandle': old_call('getApp', {'selector': str(fixture.pid)})['appHandle']}
+                        old_call('getState', {**old_owner, 'windowId': window['windowId'], 'maxDepth': 20, 'maxElements': 100})
+                        old_call('hover', {**old_owner, 'windowId': window['windowId'], **before['trackingPoint']}, 'UNSUPPORTED')
             # Tracking-only views have no actionable AX index. Use their actual
             # window-relative center from the owned fixture, not an invented index.
             assert before['windowId'] == window['windowId'], before
-            call('hover', {**owner, 'windowId': window['windowId'], **before['trackingPoint']}, 'UNSUPPORTED')
+            call('hover', {**owner, 'windowId': window['windowId'], **before['trackingPoint']}, 'UNSUPPORTED', phases=('move',))
             final = wait_for(lambda: (s if (s := json.loads(state_path.read_text()))['restores'] == 1 else None), 'AX alternate restore')
             assert not final['alternateShown'] and final['reveals'] == 1, final
             assert final['trackingEntries'] == before['trackingEntries'], final

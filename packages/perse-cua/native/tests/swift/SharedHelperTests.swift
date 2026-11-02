@@ -20,6 +20,7 @@ private func hello(overrides: [String: JSONValue] = [:]) throws -> Data {
 
 @Test func admitsPerConnectionConfiguration() throws {
     let configuration = try HelperConfiguration(hello: hello(), runtimeKey: runtimeKey)
+    #expect(!configuration.visualEvents)
     #expect(configuration.maxRequestBytes == 4096)
     #expect(configuration.maxResponseBytes == 8192)
     #expect(configuration.axTimeoutSeconds == 0.25)
@@ -29,6 +30,25 @@ private func hello(overrides: [String: JSONValue] = [:]) throws -> Data {
     #expect(configuration.shutdownGraceSeconds == 0.5)
     #expect(throws: NativeFailure.self) {
         try HelperConfiguration(hello: hello(), runtimeKey: String(repeating: "b", count: 64))
+    }
+}
+
+@Test func negotiatesVisualEventsOnlyWhenRequested() throws {
+    var fields = try #require(JSONDecoder().decode(JSONValue.self, from: hello()).object)
+    fields["capabilities"] = .array([.string("future-capability"), .string("visual-v1")])
+    let requested = try JSONEncoder().encode(JSONValue.object(fields))
+    #expect(try HelperConfiguration(hello: requested, runtimeKey: runtimeKey).visualEvents)
+    fields["sessionName"] = .string("session")
+    #expect(try HelperConfiguration(hello: JSONEncoder().encode(JSONValue.object(fields)), runtimeKey: runtimeKey).cursorSessionName == "session")
+    fields["capabilities"] = .array([.string("future-capability")])
+    #expect(throws: NativeFailure.self) {
+        try HelperConfiguration(hello: JSONEncoder().encode(JSONValue.object(fields)), runtimeKey: runtimeKey)
+    }
+    fields.removeValue(forKey: "sessionName")
+    #expect(try !HelperConfiguration(hello: JSONEncoder().encode(JSONValue.object(fields)), runtimeKey: runtimeKey).visualEvents)
+    fields["capabilities"] = .array([.number(1)])
+    #expect(throws: NativeFailure.self) {
+        try HelperConfiguration(hello: JSONEncoder().encode(JSONValue.object(fields)), runtimeKey: runtimeKey)
     }
 }
 

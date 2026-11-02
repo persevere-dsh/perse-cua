@@ -1,10 +1,17 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { PreviewService, PreviewWindow } from './view.ts'
-import type { Capture, Hooks, ListWindows } from 'perse-cua/internal-provider'
+import type { Capture, Hooks, ListWindows, VisualEvent } from 'perse-cua/internal-provider'
 
 type RecordValue = Record<string, unknown>
 const record = (value: unknown): RecordValue | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as RecordValue : undefined
+
+type Geometry = { x: number; y: number; width: number; height: number }
+const geometry = (value: unknown): Geometry | undefined => {
+  const box = record(value)
+  return box && typeof box.x === 'number' && Number.isFinite(box.x) && typeof box.y === 'number' && Number.isFinite(box.y) && typeof box.width === 'number' && Number.isFinite(box.width) && box.width > 0 && typeof box.height === 'number' && Number.isFinite(box.height) && box.height > 0 ? { x: box.x, y: box.y, width: box.width, height: box.height } : undefined
+}
+const sameGeometry = (a: Geometry | undefined, b: Geometry): boolean => !!a && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height
 
 const connectionFailures = new Set(['PERMISSION_DENIED', 'NATIVE_CLOSED', 'NATIVE_DISPOSED', 'NATIVE_CLEANUP', 'NATIVE_IO', 'NATIVE_EOF', 'NATIVE_EXITED', 'NATIVE_PROTOCOL', 'NATIVE_RESPONSE_LIMIT'])
 const transportFailures = new Set(['NATIVE_START_FAILED', 'NATIVE_CLOSED', 'NATIVE_DISPOSED', 'NATIVE_CLEANUP', 'NATIVE_IO', 'NATIVE_EOF', 'NATIVE_EXITED', 'NATIVE_PROTOCOL', 'NATIVE_RESPONSE_LIMIT'])
@@ -19,6 +26,9 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
     health?: (name: string, scope: object) => { state: 'unknown' | 'ready' | 'unavailable'; reason?: string }
   } | undefined
   const clients = new Map<Agent, Capture>()
+  const visualSequences = new Map<Agent, number>()
+  const visualStarts = new Map<string, { requestId: string; identity: string; geometry: Geometry; sequence: number; elapsedMs: number; at: number }>()
+  const processes = new Map<Agent, Map<string, string>>()
   const lists = new Map<Agent, ListWindows>()
   const watchers = new Map<string, number>()
   const watcherVersions = new Map<string, object>()
@@ -43,14 +53,17 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
   const intervalMs = options.intervalMs ?? 3000
   let refreshDelay = intervalMs
   const captures = new Map<string, AbortController>()
+  const clearMotionTimer = (id: string): void => { visualStarts.delete(id) }
   const pointTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const clearPoint = (id: string): void => { const timer = pointTimers.get(id); if (timer) clearTimeout(timer); pointTimers.delete(id) }
   let closed = false
-  const owners = new Map<Agent, Map<string, { name: string; selected?: number; windows: Map<number, PreviewWindow>; snapshots: Map<string, number>; modelImages: Map<number, { image: string; width: number; height: number }>; observations: Map<number, { width: number; height: number }>; windowSizes: Map<number, { width: number; height: number }>; captures: Map<number, { image: string; width: number; height: number }> }>>()
+  const owners = new Map<Agent, Map<string, { name: string; selected?: number; windows: Map<number, PreviewWindow>; snapshots: Map<string, number>; modelImages: Map<number, { image: string; width: number; height: number }>; observations: Map<number, { width: number; height: number }>; windowSizes: Map<number, { width: number; height: number }>; captures: Map<number, { image: string; width: number; height: number }>; windowBounds: Map<number, Geometry>; frameBounds: Map<number, Geometry> }>>()
   const idFor = (agent: Agent, handle: string, id: number): string => `${encodeURIComponent(agent.id)}/${encodeURIComponent(handle)}/${id}`
   const disposed = new WeakSet<Agent>()
   const recordConnectionFailure = (agent: Agent, code: string): void => {
     if (closed || disposed.has(agent) || !transportFailures.has(code)) return
+    clearPendingSession(agent.id)
+    for (const app of owners.get(agent)?.values() ?? []) { app.frameBounds.clear(); for (const [windowId, item] of app.windows) if (item.motion) { clearMotionTimer(item.id); const { motion: _motion, ...rest } = item; app.windows.set(windowId, rest); view.put(rest) } }
     health?.reportHealth?.('cua', agent, { state: 'unavailable', reason: code })
     const status = health?.health?.('cua', agent) ?? { state: 'unavailable', reason: code }
     if (status.state === 'unavailable') view.put({ id: `${encodeURIComponent(agent.id)}/native-status`, title: 'CUA', action: 'getState', failed: true, previewUnavailable: true, previewIssue: 'connection' })
@@ -65,17 +78,86 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
     if (!apps) return
     for (const [appHandle, app] of apps) {
       if (scope === 'application' && appHandle !== handle) continue
-      app.captures.clear(); app.modelImages.clear()
+      app.captures.clear(); app.modelImages.clear(); app.frameBounds.clear()
       for (const [windowId, item] of app.windows) {
         captures.get(item.id)?.abort(); captures.delete(item.id); clearPoint(item.id)
-        const { image: _image, capturedAt: _capturedAt, point: _point, ...rest } = item
+        clearMotionTimer(item.id)
+        const { image: _image, capturedAt: _capturedAt, point: _point, motion: _motion, ...rest } = item
         if (!item[reason] || item.image || item.capturedAt || item.point || (issue !== undefined && item.previewIssue !== issue)) {
           const failed = { ...rest, [reason]: true, ...(issue ? { previewIssue: issue } : {}) }; app.windows.set(windowId, failed); view.put(failed)
         }
       }
     }
   }
-  view.setDismissHandler(id => { captured.delete(id); dismissed.add(id); discoveryStatus.delete(id); automatic.delete(id); appearances.delete(id); missing.delete(id); captures.get(id)?.abort(); captures.delete(id); clearPoint(id); for (const apps of owners.values()) for (const app of apps.values()) for (const [window, item] of app.windows) if (item.id === id) { app.windows.delete(window); app.windowSizes.delete(window) } })
+  view.setDismissHandler(id => { captured.delete(id); dismissed.add(id); discoveryStatus.delete(id); automatic.delete(id); appearances.delete(id); missing.delete(id); captures.get(id)?.abort(); captures.delete(id); clearPoint(id); clearMotionTimer(id); clearPendingVisual(id); for (const apps of owners.values()) for (const app of apps.values()) for (const [window, item] of app.windows) if (item.id === id) { app.windows.delete(window); app.windowSizes.delete(window); app.windowBounds.delete(window); app.frameBounds.delete(window) } })
+  const pendingVisuals = new Map<string, { agent: Agent; events: Array<{ event: VisualEvent; at: number }> }>()
+  const clearPendingVisual = (id: string): void => { pendingVisuals.delete(id) }
+  const clearPendingSession = (id: string): void => { for (const key of pendingVisuals.keys()) if (key.startsWith(`${encodeURIComponent(id)}/`)) clearPendingVisual(key) }
+  const publishVisual = (agent: Agent, event: VisualEvent): boolean => {
+    const app = owners.get(agent)?.get(event.appHandle), item = app?.windows.get(event.windowId)
+    if (event.phase === 'clear') return false
+    if (!app || !item || !sameGeometry(app.windowBounds.get(event.windowId), event.geometry) || !sameGeometry(app.frameBounds.get(event.windowId), event.geometry) || !item.image || item.windowUnavailable || item.previewUnavailable) return false
+        const prior = visualStarts.get(item.id)
+        clearMotionTimer(item.id)
+        const { point: _point, ...rest } = item
+        const continuing = event.phase === 'click' && item.motion?.phase === 'move' && prior?.requestId === event.requestId && prior.sequence === item.motion.sequence
+        const elapsedMs = continuing ? prior.elapsedMs + Math.max(0, performance.now() - prior.at) : event.elapsedMs
+        const motion = { sequence: event.sequence, color: event.color, trajectory: continuing ? item.motion!.trajectory : event.trajectory, elapsedMs, ...(event.phase === 'click' ? { clickElapsedMs: event.elapsedMs } : {}), phase: event.phase }
+        visualStarts.set(item.id, { requestId: event.requestId, identity: `${event.process.pid}/${event.process.startedSeconds}/${event.process.startedMicroseconds}`, geometry: event.geometry, sequence: event.sequence, elapsedMs, at: performance.now() })
+        const next = { ...rest, motion }; app.windows.set(event.windowId, next); view.put(next)
+    return true
+  }
+  const applyPendingVisual = (agent: Agent, handle: string, windowId: number): void => {
+    const id = idFor(agent, handle, windowId), pending = pendingVisuals.get(id)
+    if (!pending || pending.agent !== agent) return
+    const app = owners.get(agent)?.get(handle), bounds = app?.windowBounds.get(windowId)
+    if (bounds && pending.events.some(({ event }) => !sameGeometry(bounds, event.geometry))) { clearPendingVisual(id); return }
+    const now = performance.now()
+    const events = pending.events.map(({ event, at }) => ({ ...event, elapsedMs: event.elapsedMs + Math.max(0, now - at) }))
+    if (events.every(event => publishVisual(agent, event))) clearPendingVisual(id)
+  }
+  const onVisual = (agent: Agent, event: VisualEvent): void => {
+    if (closed || disposed.has(agent) || paused.has(agent.id) || event.sequence <= (visualSequences.get(agent) ?? -1)) return
+    visualSequences.set(agent, event.sequence)
+    const app = owners.get(agent)?.get(event.appHandle)
+    if (!app) return
+    const identity = `${event.process.pid}/${event.process.startedSeconds}/${event.process.startedMicroseconds}`
+    let identities = processes.get(agent); if (!identities) { identities = new Map(); processes.set(agent, identities) }
+    const id = idFor(agent, event.appHandle, event.windowId), item = app.windows.get(event.windowId)
+    if (event.phase === 'clear') {
+      const matches = (other: VisualEvent): boolean => other.requestId === event.requestId && sameGeometry(other.geometry, event.geometry) && other.process.pid === event.process.pid && other.process.startedSeconds === event.process.startedSeconds && other.process.startedMicroseconds === event.process.startedMicroseconds
+      if (pendingVisuals.get(id)?.events.some(({ event: previous }) => matches(previous))) clearPendingVisual(id)
+      const previous = visualStarts.get(id)
+      if (item?.motion && previous?.requestId === event.requestId && previous.identity === identity && sameGeometry(previous.geometry, event.geometry)) { clearMotionTimer(id); const { motion: _motion, ...rest } = item; app.windows.set(event.windowId, rest); view.put(rest) }
+      return
+    }
+    if ((identities.has(event.appHandle) && identities.get(event.appHandle) !== identity) || dismissed.has(id)) {
+      clearPendingVisual(id); if (item?.motion) { clearMotionTimer(id); const { motion: _motion, ...rest } = item; app.windows.set(event.windowId, rest); view.put(rest) }; return
+    }
+    identities.set(event.appHandle, identity)
+    for (const [otherId, pending] of pendingVisuals) if (pending.agent === agent && otherId !== id) clearPendingVisual(otherId)
+    for (const otherApp of owners.get(agent)?.values() ?? []) for (const [windowId, other] of otherApp.windows) if (other.id !== id && other.motion) {
+      clearMotionTimer(other.id); const { motion: _motion, ...rest } = other; otherApp.windows.set(windowId, rest); view.put(rest)
+    }
+    const bounds = app.windowBounds.get(event.windowId)
+    if (bounds && !sameGeometry(bounds, event.geometry)) {
+      clearPendingVisual(id); if (item?.motion) { clearMotionTimer(id); const { motion: _motion, ...rest } = item; app.windows.set(event.windowId, rest); view.put(rest) }; return
+    }
+    if (publishVisual(agent, event)) { clearPendingVisual(id); return }
+    if (item?.motion) { clearMotionTimer(id); const { motion: _motion, ...rest } = item; app.windows.set(event.windowId, rest); view.put(rest) }
+    const prior = pendingVisuals.get(id), now = performance.now()
+    const previous = event.phase === 'click' && prior?.agent === agent ? prior.events.find(entry => entry.event.phase === 'move' && entry.event.requestId === event.requestId) : undefined
+    clearPendingVisual(id)
+    pendingVisuals.set(id, { agent, events: [...(previous ? [previous] : []), { event, at: now }] })
+    while (pendingVisuals.size > 128) { const oldest = pendingVisuals.keys().next().value; if (oldest === undefined) break; clearPendingVisual(oldest) }
+  }
+  const clearRequestVisual = (agent: Agent, requestId: string): void => {
+    for (const [id, pending] of pendingVisuals) if (pending.agent === agent && pending.events.some(({ event }) => event.requestId === requestId)) clearPendingVisual(id)
+    for (const app of owners.get(agent)?.values() ?? []) for (const [windowId, item] of app.windows) {
+      if (visualStarts.get(item.id)?.requestId !== requestId) continue
+      clearMotionTimer(item.id); const { motion: _motion, ...rest } = item; app.windows.set(windowId, rest); view.put(rest)
+    }
+  }
   const schedule = (abort = false, sessionId?: string): void => {
     if (abort && (sessionId === undefined || backgroundAgent?.id === sessionId)) background?.abort()
     if (closed || !watchers.size || [...watchers.keys()].every(id => paused.has(id) || permissionBlocked.has(id))) {
@@ -144,6 +226,12 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
             const id = idFor(agent, handle, row.windowId)
             if (dismissed.has(id)) continue
             let old = app.windows.get(row.windowId)
+            const bounds = geometry(row.bounds)
+            if (bounds) {
+              const previousBounds = app.windowBounds.get(row.windowId)
+              app.windowBounds.set(row.windowId, bounds)
+              if (previousBounds && !sameGeometry(previousBounds, bounds) && old?.motion) { clearMotionTimer(id); const { motion: _motion, ...rest } = old; old = rest; app.windows.set(row.windowId, old); view.put(old) }
+            }
             const size = app.windowSizes.get(row.windowId)
             app.windowSizes.set(row.windowId, { width: row.bounds.width, height: row.bounds.height })
             if (old && size && (size.width !== row.bounds.width || size.height !== row.bounds.height)) {
@@ -172,9 +260,9 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
           const prefix = `${encodeURIComponent(agent.id)}/${encodeURIComponent(handle)}/`
           for (const id of appearances.keys()) if (id.startsWith(prefix) && !visible.some(row => idFor(agent, handle, row.windowId) === id)) appearances.delete(id)
           for (const [windowId, old] of app.windows) if (!seen.has(windowId)) {
-            view.invalidatePoint?.(old.id); clearPoint(old.id)
+            view.invalidatePoint?.(old.id); clearPoint(old.id); clearMotionTimer(old.id)
             captures.get(old.id)?.abort(); captures.delete(old.id)
-            const { point: _point, ...withoutPoint } = old
+            const { point: _point, motion: _motion, ...withoutPoint } = old
             if (automatic.has(old.id)) {
               const count = (missing.get(old.id) ?? 0) + 1
               missing.set(old.id, count)
@@ -202,13 +290,16 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
       if (!old || !target.valid() || shot.windowId !== target.window) return
       clearPoint(old.id)
       const { point: _point, previewIssue: _previewIssue, ...rest } = old
+      const nextBounds = geometry(shot.bounds)
+      if (rest.motion && (!nextBounds || !sameGeometry(app.frameBounds.get(target.window), nextBounds))) { delete rest.motion; clearMotionTimer(old.id) }
       const image = `data:${shot.mimeType};base64,${shot.data}`
       const item = { ...rest, image, capturedAt: Date.now(), previewUnavailable: false, windowUnavailable: false }
       if (shot.bounds) {
         app.captures.set(target.window, { image, width: shot.bounds.width, height: shot.bounds.height })
         app.windowSizes.set(target.window, { width: shot.bounds.width, height: shot.bounds.height })
+        const bounds = geometry(shot.bounds); if (bounds) app.frameBounds.set(target.window, bounds); else app.frameBounds.delete(target.window)
       }
-      app.windows.set(target.window, item); view.put(item)
+      app.windows.set(target.window, item); view.put(item); applyPendingVisual(target.agent, target.handle, target.window)
     } catch (error) {
       if (!controller.signal.aborted && !closed) {
         const code = record(error)?.code
@@ -252,11 +343,13 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
   const finishTurn = (id: string, status: NonNullable<PreviewWindow['activity']>): void => {
     if (!activeTurns.delete(id)) return
     paused.set(id, status)
+    clearPendingSession(id)
     stopCaptures(id)
     for (const [windowId, entry] of toolSignals) if (entry.id === id) detachToolSignal(windowId)
     for (const [agent, apps] of owners) if (agent.id === id) for (const app of apps.values()) for (const [windowId, item] of app.windows) {
       clearPoint(item.id)
-      const { point: _point, ...rest } = item
+      clearMotionTimer(item.id)
+      const { point: _point, motion: _motion, ...rest } = item
       const ended = { ...rest, working: false, activity: status }; app.windows.set(windowId, ended); view.put(ended)
     }
   }
@@ -274,12 +367,19 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
       for (const [prior, entry] of toolSignals) if (entry.id === id && entry.settled) detachToolSignal(prior)
       const version = turnVersions.get(id)
       if (version) { executionVersions.set(exec, version); activeTurns.add(id) }
-      // Cancellation can be local to this tool call; turn/end owns the final activity.
-      const onAbort = (): void => { paused.set(id, 'stopped'); stopCaptures(id) }
+      // A cancelled read does not end the turn or interrupt a separate preview.
+      const method = record(exec.arguments)?.method
+      const passiveRead = method === 'getCapabilities' || method === 'listApps' || method === 'findApps' || method === 'listWindows' || method === 'getState' || method === 'screenshot'
+      const onAbort = (): void => { if (!passiveRead) {
+        paused.set(id, 'stopped'); clearPendingSession(id); stopCaptures(id)
+        for (const app of owners.get(exec.agent!)?.values() ?? []) for (const [windowId, item] of app.windows) if (item.motion) {
+          clearMotionTimer(item.id); const { motion: _motion, ...rest } = item; app.windows.set(windowId, rest); view.put(rest)
+        }
+      } }
       toolSignals.set(exec, { id, signal: exec.signal, stop: onAbort, settled: false })
       exec.signal.addEventListener('abort', onAbort, { once: true })
       if (exec.signal.aborted) onAbort()
-      else if (activeTurns.has(id) && !pendingTurns.has(id)) { paused.delete(id); schedule() }
+      else if (activeTurns.has(id)) { paused.delete(id); schedule() }
     }
     return next()
   })
@@ -287,6 +387,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
     if (exec.name !== 'cua' || !exec.agent || disposed.has(exec.agent)) return
     const signalEntry = toolSignals.get(exec)
     if (signalEntry) signalEntry.settled = true
+    if (result.isError && typeof exec.callId === 'string') clearRequestVisual(exec.agent, exec.callId)
     const version = executionVersions.get(exec)
     if (exec.signal.aborted || (version && version !== turnVersions.get(exec.agent.id))) return
     const request = record(exec.arguments)
@@ -312,7 +413,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
       const previous = apps.get(value.appHandle)
       if (previous) {
         if (typeof value.name === 'string') previous.name = value.name
-      } else apps.set(value.appHandle, { name: typeof value.name === 'string' ? value.name : 'Application', windows: new Map(), snapshots: new Map(), modelImages: new Map(), observations: new Map(), windowSizes: new Map(), captures: new Map() })
+      } else apps.set(value.appHandle, { name: typeof value.name === 'string' ? value.name : 'Application', windows: new Map(), snapshots: new Map(), modelImages: new Map(), observations: new Map(), windowSizes: new Map(), captures: new Map(), windowBounds: new Map(), frameBounds: new Map() })
       schedule()
       return
     }
@@ -334,6 +435,13 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
         if (typeof window?.windowId !== 'number') continue
         const windowId = window.windowId; seen.add(windowId)
         const bounds = record(window.bounds)
+        const completeBounds = geometry(window.bounds)
+        if (completeBounds) {
+          const previousBounds = app.windowBounds.get(windowId)
+          app.windowBounds.set(windowId, completeBounds)
+          const current = app.windows.get(windowId)
+          if (previousBounds && !sameGeometry(previousBounds, completeBounds) && current?.motion) { clearMotionTimer(current.id); const { motion: _motion, ...rest } = current; app.windows.set(windowId, rest); view.put(rest) }
+        }
         const size = app.windowSizes.get(windowId)
         const nextSize = typeof bounds?.width === 'number' && typeof bounds.height === 'number' ? { width: bounds.width, height: bounds.height } : undefined
         const resized = nextSize !== undefined && size !== undefined && (size.width !== nextSize.width || size.height !== nextSize.height)
@@ -343,15 +451,15 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
         if (!old) continue
         const title = [app.name, typeof window.title === 'string' ? window.title : ''].filter(Boolean).join(' · ')
         const unavailable = window.isOnScreen === false || window.onCurrentSpace === false
-        if (resized || unavailable) { view.invalidatePoint?.(old.id); clearPoint(old.id); captures.get(old.id)?.abort(); captures.delete(old.id) }
+        if (resized || unavailable) { view.invalidatePoint?.(old.id); clearPoint(old.id); clearMotionTimer(old.id); captures.get(old.id)?.abort(); captures.delete(old.id) }
         if (resized) { clearPoint(old.id); app.captures.delete(windowId); app.modelImages.delete(windowId); if (method !== 'getState') app.observations.delete(windowId) }
         if (old.title !== title || !!old.windowUnavailable !== unavailable || resized) {
-          const { windowUnavailable: _unavailable, point, ...rest } = old
-          const item = { ...rest, title, ...(!resized && !unavailable && point ? { point } : {}), ...(unavailable ? { windowUnavailable: true } : {}), ...(resized ? { previewUnavailable: true } : {}) }
+          const { windowUnavailable: _unavailable, point, motion, ...rest } = old
+          const item = { ...rest, title, ...(!resized && !unavailable && point ? { point } : {}), ...(!resized && !unavailable && motion ? { motion } : {}), ...(unavailable ? { windowUnavailable: true } : {}), ...(resized ? { previewUnavailable: true } : {}) }
           app.windows.set(windowId, item); view.put(item)
         }
       }
-      for (const [windowId, old] of app.windows) if (!seen.has(windowId) && !old.windowUnavailable) { view.invalidatePoint?.(old.id); clearPoint(old.id); captures.get(old.id)?.abort(); captures.delete(old.id); const { point: _point, ...rest } = old; const item = { ...rest, windowUnavailable: true }; app.windows.set(windowId, item); view.put(item) }
+      for (const [windowId, old] of app.windows) if (!seen.has(windowId) && !old.windowUnavailable) { view.invalidatePoint?.(old.id); clearPoint(old.id); clearMotionTimer(old.id); captures.get(old.id)?.abort(); captures.delete(old.id); const { point: _point, motion: _motion, ...rest } = old; const item = { ...rest, windowUnavailable: true }; app.windows.set(windowId, item); view.put(item) }
     }
     if (method === 'listWindows') return
     const selected = typeof value?.windowId === 'number' ? value.windowId : typeof params.windowId === 'number' ? params.windowId : typeof params.snapshotId === 'string' && app.snapshots.has(params.snapshotId) ? app.snapshots.get(params.snapshotId) : typeof value?.focusedWindowId === 'number' ? value.focusedWindowId : app.selected
@@ -371,11 +479,14 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
     const item: PreviewWindow = { ...old, id, title: row ? title : old?.title ?? title, action: method, ...(result.isError ? { failed: true } : { failed: false }) }
     clearPoint(id)
     delete item.point
-    if (result.isError) { delete item.image; delete item.capturedAt }
+    if (result.isError) { delete item.image; delete item.capturedAt; delete item.motion; clearMotionTimer(id); app.frameBounds.delete(selected) }
     if (method === 'screenshot' && typeof value?.data === 'string' && typeof value.mimeType === 'string') {
       item.image = `data:${value.mimeType};base64,${value.data}`; item.capturedAt = Date.now(); item.previewUnavailable = false; item.windowUnavailable = false
       delete item.previewIssue
       const bounds = record(value.bounds)
+      const frameBounds = geometry(value.bounds)
+      if (item.motion && (!frameBounds || !sameGeometry(app.frameBounds.get(selected), frameBounds))) { delete item.motion; clearMotionTimer(id) }
+      if (frameBounds) { app.frameBounds.set(selected, frameBounds); app.windowBounds.set(selected, frameBounds) } else app.frameBounds.delete(selected)
       if (typeof bounds?.width === 'number' && bounds.width > 0 && typeof bounds.height === 'number' && bounds.height > 0) app.windowSizes.set(selected, { width: bounds.width, height: bounds.height })
       if (typeof value.pixelWidth === 'number' && typeof value.pixelHeight === 'number' && value.pixelWidth > 0 && value.pixelHeight > 0) app.modelImages.set(selected, { image: item.image, width: value.pixelWidth, height: value.pixelHeight })
     }
@@ -387,7 +498,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
       item.point = relative ? { x: params.x / 1000, y: params.y / 1000 } : { x: params.x / model!.width, y: params.y / model!.height }
       pointTimers.set(id, setTimeout(() => { pointTimers.delete(id); const current = app.windows.get(selected); if (!current) return; const { point: _point, ...rest } = current; app.windows.set(selected, rest); view.put(rest) }, 900))
     }
-    app.windows.set(selected, item); view.put(item, !!item.point)
+    app.windows.set(selected, item); view.put(item, !!item.point); if (!result.isError) applyPendingVisual(agent, handle, selected); else clearPendingVisual(id)
     const previous = captures.get(id)
     previous?.abort()
     captures.delete(id)
@@ -417,12 +528,15 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
       if (!latest) return
       clearPoint(id)
       const { point: _point, previewIssue: _previewIssue, ...rest } = latest
+      const nextBounds = geometry(shot.bounds)
+      if (rest.motion && (!nextBounds || !sameGeometry(app.frameBounds.get(selected), nextBounds))) { delete rest.motion; clearMotionTimer(id) }
       const next = { ...rest, image: `data:${shot.mimeType};base64,${shot.data}`, capturedAt: Date.now(), previewUnavailable: false, windowUnavailable: false }
       if (shot.bounds) {
         app.captures.set(selected, { image: next.image, width: shot.bounds.width, height: shot.bounds.height })
         app.windowSizes.set(selected, { width: shot.bounds.width, height: shot.bounds.height })
+        const bounds = geometry(shot.bounds); if (bounds) app.frameBounds.set(selected, bounds); else app.frameBounds.delete(selected)
       }
-      app.windows.set(selected, next); view.put(next)
+      app.windows.set(selected, next); view.put(next); applyPendingVisual(agent, handle, selected)
     }).catch(error => {
       if (closed || controller.signal.aborted || captures.get(id) !== controller || disposed.has(agent)) return
       const latest = app.windows.get(selected)
@@ -444,34 +558,25 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
   })
   const stopAgent = ctx.on('agent/disposed', ({ agent }) => {
     disposed.add(agent)
+    clearPendingSession(agent.id)
     for (const [exec, entry] of toolSignals) if (entry.id === agent.id) detachToolSignal(exec)
     turnVersions.delete(agent.id); activeTurns.delete(agent.id); pendingTurns.delete(agent.id); paused.delete(agent.id); permissionBlocked.delete(agent.id)
     for (const id of captured.keys()) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) captured.delete(id)
-    clients.delete(agent); lists.delete(agent); for (const id of dismissed) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { dismissed.delete(id); automatic.delete(id); appearances.delete(id); missing.delete(id) }; for (const id of automatic) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { automatic.delete(id); missing.delete(id) }; for (const id of appearances.keys()) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) appearances.delete(id); schedule(true, agent.id)
+    clients.delete(agent); visualSequences.delete(agent); processes.delete(agent); lists.delete(agent); for (const id of dismissed) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { dismissed.delete(id); automatic.delete(id); appearances.delete(id); missing.delete(id) }; for (const id of automatic) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { automatic.delete(id); missing.delete(id) }; for (const id of appearances.keys()) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) appearances.delete(id); schedule(true, agent.id)
     for (const [id, controller] of captures) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { controller.abort(); captures.delete(id) }
     for (const id of pointTimers.keys()) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) clearPoint(id)
+    for (const id of visualStarts.keys()) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) clearMotionTimer(id)
     const apps = owners.get(agent)
     if (apps) for (const [handle, app] of apps) { const statusId = `${encodeURIComponent(agent.id)}/${encodeURIComponent(handle)}/status`; unsupported.delete(statusId); discoveryStatus.delete(statusId); view.remove(statusId); for (const item of app.windows.values()) view.remove(item.id) }
     owners.delete(agent)
   })
   return {
     hooks: {
+      onVisual,
       onConnectionReady: recordConnectionReady,
       onConnectionFailure: recordConnectionFailure,
-      onClient: (agent, capture, list) => { if (!closed && !disposed.has(agent)) { clients.set(agent, capture); if (list) lists.set(agent, list) } },
-      onRevoke: (agent) => {
-        if (turnVersions.has(agent.id)) turnVersions.set(agent.id, {})
-        for (const [exec, entry] of toolSignals) if (entry.id === agent.id) detachToolSignal(exec)
-        const apps = owners.get(agent)
-        if (!apps) return
-        for (const [handle, app] of apps) { const statusId = `${encodeURIComponent(agent.id)}/${encodeURIComponent(handle)}/status`; unsupported.delete(statusId); discoveryStatus.delete(statusId); view.remove(statusId); for (const item of app.windows.values()) {
-          captures.get(item.id)?.abort(); captures.delete(item.id); clearPoint(item.id); view.remove(item.id)
-        } }
-        owners.delete(agent)
-        for (const id of captured.keys()) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) captured.delete(id)
-        clients.delete(agent); lists.delete(agent); for (const id of dismissed) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { dismissed.delete(id); automatic.delete(id); appearances.delete(id); missing.delete(id) }; for (const id of automatic) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { automatic.delete(id); missing.delete(id) }; for (const id of appearances.keys()) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) appearances.delete(id); schedule(true, agent.id)
-      },
+      onClient: (agent, capture, list) => { if (!closed && !disposed.has(agent)) { if (clients.has(agent)) { clearPendingSession(agent.id); visualSequences.delete(agent); processes.delete(agent); for (const app of owners.get(agent)?.values() ?? []) { app.frameBounds.clear(); for (const [windowId, item] of app.windows) if (item.motion) { clearMotionTimer(item.id); const { motion: _motion, ...rest } = item; app.windows.set(windowId, rest); view.put(rest) } } }; clients.set(agent, capture); if (list) lists.set(agent, list) } },
     },
-    close: () => { closed = true; if (refreshTimer) clearTimeout(refreshTimer); background?.abort(); watchers.clear(); watcherVersions.clear(); paused.clear(); pendingTurns.clear(); activeTurns.clear(); permissionBlocked.clear(); for (const exec of toolSignals.keys()) detachToolSignal(exec); turnVersions.clear(); captured.clear(); lists.clear(); dismissed.clear(); automatic.clear(); appearances.clear(); missing.clear(); unsupported.clear(); discoveryStatus.clear(); stop(); stopAgent(); stopTurns(); stopToolSignals(); for (const controller of captures.values()) controller.abort(); captures.clear(); for (const id of pointTimers.keys()) clearPoint(id); clients.clear(); owners.clear() },
+    close: () => { closed = true; if (refreshTimer) clearTimeout(refreshTimer); background?.abort(); watchers.clear(); watcherVersions.clear(); paused.clear(); pendingTurns.clear(); activeTurns.clear(); permissionBlocked.clear(); for (const exec of toolSignals.keys()) detachToolSignal(exec); turnVersions.clear(); captured.clear(); lists.clear(); dismissed.clear(); automatic.clear(); appearances.clear(); missing.clear(); unsupported.clear(); discoveryStatus.clear(); stop(); stopAgent(); stopTurns(); stopToolSignals(); for (const controller of captures.values()) controller.abort(); captures.clear(); for (const id of pointTimers.keys()) clearPoint(id); for (const id of visualStarts.keys()) clearMotionTimer(id); for (const id of pendingVisuals.keys()) clearPendingVisual(id); visualStarts.clear(); clients.clear(); visualSequences.clear(); processes.clear(); owners.clear() },
   }
 }

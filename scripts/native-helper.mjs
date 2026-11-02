@@ -10,6 +10,7 @@ export const repositoryRoot=resolve(dirname(fileURLToPath(import.meta.url)),'..'
 const nativeRoot=join(repositoryRoot,'packages/perse-cua/native');
 const architectures=new Map([['arm64','arm64'],['x64','x86_64']]);
 export async function sourceDigest(){
+  run(process.execPath,[join(repositoryRoot,'scripts/generate-cursor-theme.mjs'),'--check']);
   const hash=createHash('sha256');
   async function add(relative){
     const absolute=join(nativeRoot,relative),stat=await lstat(absolute);
@@ -75,6 +76,7 @@ export async function verifyHelper({binary,arch,manifest,requireDeveloperId=fals
 /** Compile in a staging-owned scratch directory, sign, verify, then publish the payload atomically. */
 export async function buildHelper(options){
   if(process.platform!=='darwin')throw Error('CUA helper build requires macOS');
+  run(process.execPath,[join(repositoryRoot,'scripts/generate-cursor-theme.mjs'),'--check']);
   const {arch,output,signIdentity,requireDeveloperId}=options;
   const target=join(output,'darwin-'+arch),scratch=await mkdtemp(join(tmpdir(),'wuzhimiao-cua-build-'));
   await mkdir(target,{recursive:true});

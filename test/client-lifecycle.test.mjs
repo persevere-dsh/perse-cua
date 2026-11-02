@@ -7,6 +7,7 @@ import { Context } from '@deepseek-ai/cordis'
 const source = readFileSync(new URL('../packages/perse-cua/client/index.jsx', import.meta.url), 'utf8')
   .replace("import React, { useEffect, useRef, useState } from 'react'", `const { React, useEffect, useRef, useState } = globalThis.__perseTestReact`)
   .replace("import remote from '../lib/typert.remote-client.js'", 'const remote = {}')
+  .replace("import theme from '../cursor-theme.json'", `const theme = ${readFileSync(new URL('../packages/perse-cua/cursor-theme.json', import.meta.url), 'utf8')}`)
 
 test('client reopens an ended preview stream and stops retrying when disposed', async () => {
   const effects = []

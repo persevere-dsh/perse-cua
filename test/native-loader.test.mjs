@@ -112,7 +112,7 @@ test('macOS native loader entry stops on disable', { skip: process.platform !== 
     assert.ok(schema.properties.method.enum.includes('saveScreenshot'))
     const removeSkillCatalog = ctx.systemPrompt.section({ name: 'fixture:skill-catalog', order: 0, text: 'Available skill: cua-driver (CLI or MCP). Load the skill for GUI tasks.' })
     const guidance = renderPrompt(await ctx.systemPrompt.assemble())
-    assert.match(guidance, /use the registered cua tool and its application authorization flow/ )
+    assert.match(guidance, /use the registered cua tool/ )
     assert.match(guidance, /Available skill: cua-driver/ )
     assert.match(guidance, /Do not use external cua-driver CLI or MCP tools/ )
     assert.match(guidance, /If a required capability is unavailable, explain the limitation/ )
@@ -155,67 +155,10 @@ test('native entry reuses host registry, suspends on removal, and resumes on ret
   } finally { await ctx.fiber.dispose() }
 })
 
-test('native application access requires a task approval before fixture observation', { skip: process.platform !== 'darwin' }, async () => {
-  const root = await mkdtemp(join(tmpdir(), 'perse-consent-'))
-  const helper = join(root, 'native-helper.mjs')
-  const source = await readFile(new URL('./fixtures/native-helper.mjs', import.meta.url), 'utf8')
-  await writeFile(helper, `${source}\n// Fixture directory: ${JSON.stringify(root)}\n`, { mode: 0o700 })
-  await writeFile(join(root, 'observe-helper'), '')
-  const closeHost = await startFixtureHost(helper)
-  const ctx = new Context()
-  try {
-    for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess]) await ctx.plugin(plugin)
-    ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
-    let selected = 'Deny'
-    ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: [selected] }] } } })
-    ctx.loader.builtins.perse = Main
-    await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper } })
-    await ctx.loader.await()
-    await waitFor(() => ctx.tools.get('cua'))
-    const tool = ctx.tools.get('cua')
-    const deniedAgent = { id: 'denied', ctx }
-    const allowedAgent = { id: 'allowed', ctx }
-    const agents = new Map([[deniedAgent.id, deniedAgent], [allowedAgent.id, allowedAgent]])
-    ctx.agents.get = id => agents.get(id)
-    const execution = agent => ({ agent, signal: new AbortController().signal, callId: 'fixture-call' })
-    await assert.rejects(tool.execute({ method: 'getApp', params: { selector: 'Fixture' } }, execution(deniedAgent)), /denied/i)
-    const events = () => readFile(join(root, 'helper-events.jsonl'), 'utf8').then(text => text.trim().split('\n').map(JSON.parse))
-    assert.equal((await events()).some(event => event.method === 'getState'), false)
-    selected = 'Allow for this task'
-    const app = await tool.execute({ method: 'getApp', params: { selector: 'Fixture' } }, execution(allowedAgent))
-    const state = await tool.execute({ method: 'getState', params: { appHandle: app.appHandle, windowId: 7 } }, execution(allowedAgent))
-    assert.equal(state.windowId, 7)
-    await assert.rejects(tool.execute({ method: 'saveScreenshot', params: { appHandle: app.appHandle, windowId: 7 } }, execution(allowedAgent)), /ARTIFACT_UNAVAILABLE/)
-    let bytes
-    const ref = { mediaType: 'image/png', width: 1, height: 1 }
-    ctx.provide('attachments', {
-      async saveImages(images) { bytes = images[0].data; return [ref] },
-      async readImage() { return { data: bytes, ref } },
-      async saveFile({ data }) { return { bytes: data.length } },
-      fileHostPath() { return '/fixture/screenshot.png' },
-    })
-    ctx.provide('fs', {
-      processPathFromHostPath: value => value,
-      resolve: async value => value,
-      processPath: value => value,
-      lstat: async () => ({ type: 'file' }),
-      stat: async () => ({ type: 'file', size: bytes.length }),
-      readBytes: async () => bytes,
-    })
-    const saved = await tool.execute({ method: 'saveScreenshot', params: { appHandle: app.appHandle, windowId: 7 } }, execution(allowedAgent))
-    assert.equal(saved.path, '/fixture/screenshot.png')
-    assert.equal(saved.modelReceivedImage, false)
-    assert.equal(Object.hasOwn(saved, 'data'), false)
-    assert.equal((await events()).some(event => event.method === 'getState'), true)
-    await tool.execute({ method: 'getApp', params: { selector: 'Fixture', instance: 'new' } }, execution(allowedAgent))
-    assert.equal((await events()).some(event => event.method === 'getApp' && event.params.instance === 'new'), true)
-  } finally { await ctx.fiber.dispose(); await closeHost(); await rm(root, { recursive: true, force: true }) }
-})
-
-test('saved fixture consent is written to the loader entry and reused after restart', { skip: process.platform !== 'darwin' }, async () => {
+test('native discovery and access use system permissions with legacy profile settings', { skip: process.platform !== 'darwin' }, async () => {
   const home = await mkdtemp(join(tmpdir(), 'perse-saved-consent-')), dir = join(home, 'profile')
   const helper = join(home, 'native-helper.mjs')
-  const source = await readFile(new URL('./fixtures/native-helper.mjs', import.meta.url), 'utf8')
+  const source = (await readFile(new URL('./fixtures/native-helper.mjs', import.meta.url), 'utf8')).replace('      let response\n      try {', "      if (request.method === 'getState') { socket.write(JSON.stringify({ id: request.id, error: { code: 'PERMISSION_DENIED', message: 'fixture denied' } }) + '\\n'); return }\n      let response\n      try {")
   await writeFile(helper, `${source}\n// Fixture directory: ${JSON.stringify(home)}\n`, { mode: 0o700 })
   const closeHost = await startFixtureHost(helper)
   const contexts = []
@@ -225,11 +168,11 @@ test('saved fixture consent is written to the loader entry and reused after rest
     await mkdir(bundle, { recursive: true })
     await writeFile(join(home, 'package.json'), '{"name":"fixture-installation"}\n')
     await writeFile(join(bundle, 'package.json'), JSON.stringify({ name: 'perse-fixture-bundle', version: '1.0.0', dsh: { bundle: { patch: 'cordis.patch.yml' } } }))
-    await writeFile(join(bundle, 'cordis.patch.yml'), JSON.stringify([{ insert: [{ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper } }] }]))
+    await writeFile(join(bundle, 'cordis.patch.yml'), JSON.stringify([{ insert: [{ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper, profileConsent: 'denied', allowedApps: [] } }] }]))
     await writeFile(join(dir, 'cordis.yml'), '[]\n')
     const profile = { name: 'test', startedBundles: ['perse-fixture-bundle'], dir, patchPath: join(dir, 'cordis.patch.yml'),
       installAnchor: join(home, 'package.json'), cwd: home, home, overlays: [], telemetryDisabledEnv: undefined }
-    async function open(answer) {
+    async function open() {
       const ctx = new Context(); contexts.push(ctx)
       ctx.baseUrl = pathToFileURL(home).href + '/'
       ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
@@ -237,7 +180,6 @@ test('saved fixture consent is written to the loader entry and reused after rest
       const healthReports = []
       ctx.provide('profileToolAdmission', { version: 1, stage() {}, health() { return { state: 'unknown' } }, reportHealth(name, agent, health) { healthReports.push({ name, agent, health }) }, reportStartupFailure() {} })
       ctx.provide('appReady', { onReady: listener => { listener(); return () => {} } })
-      ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: [answer] }] } } })
       for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess, ConfigEditor]) await ctx.plugin(plugin)
       ctx.loader.builtins.perse = Main
       await mountRootInclude(ctx, join(dir, 'cordis.yml'), readProfilePatches('test', profile))
@@ -248,17 +190,14 @@ test('saved fixture consent is written to the loader entry and reused after rest
       ctx.agents.get = id => id === agent.id ? agent : undefined
       return { ctx, agent, tool: ctx.tools.get('cua'), healthReports }
     }
-    const first = await open('Always allow')
-    await first.tool.execute({ method: 'getApp', params: { selector: 'Fixture' } }, { agent: first.agent, signal: new AbortController().signal, callId: 'first' })
-    assert.ok(first.healthReports.some(item => item.name === 'cua' && item.agent === first.agent && item.health.state === 'ready'))
-    assert.match(await readFile(profile.patchPath, 'utf8'), /a{64}/)
-    assert.ok(first.ctx.settings.describe().some(item => item.ns === 'perse-cua'))
-    await first.ctx.fiber.dispose()
-    const second = await open('Deny')
-    const app = await second.tool.execute({ method: 'getApp', params: { selector: 'Fixture' } }, { agent: second.agent, signal: new AbortController().signal, callId: 'second' })
+    const first = await open()
+    const call = (method, params = {}) => first.tool.execute({ method, params }, { agent: first.agent, signal: new AbortController().signal, callId: 'fixture' })
+    assert.equal((await call('getCapabilities')).platform, 'macos')
+    assert.ok(await call('listApps'))
+    const app = await call('getApp', { selector: 'Fixture' })
     assert.ok(app.appHandle)
-    closeHost.crash()
-    await waitFor(() => second.healthReports.some(item => item.agent === second.agent && item.health.state === 'unavailable'))
+    await assert.rejects(call('getState', { appHandle: app.appHandle, windowId: 7 }), /PERMISSION_DENIED/)
+    assert.ok(first.healthReports.some(item => item.name === 'cua' && item.agent === first.agent && item.health.state === 'ready'))
   } finally {
     for (const ctx of contexts) await ctx.fiber.dispose()
     await closeHost()
@@ -277,7 +216,6 @@ test('native preview captures an authorized window without changing model coordi
   try {
     for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess]) await ctx.plugin(plugin)
     ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
-    ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] } } })
     ctx.loader.builtins.perse = Main
     await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper, allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }] } })
     await ctx.loader.await(); await waitFor(() => ctx.tools.get('cua'))
@@ -323,10 +261,6 @@ test('native preview captures an authorized window without changing model coordi
     const refreshed = await call('getState', { appHandle: app.value.appHandle, windowId: 7 })
     assert.equal(refreshed.isError, false)
     while (!items.some(item => item.id.endsWith('/7') && item.image)) items = (await reader.next()).value
-    await ctx.loader.update('perse-cua', { config: { helperPath: helper, allowedApps: [] } })
-    await ctx.loader.await()
-    while (items.length !== 0) items = await Promise.race([reader.next().then(x => x.value), new Promise((_, reject) => setTimeout(() => reject(new Error('revoke timeout')), 2000))])
-    assert.deepEqual(items, [])
     await reader.return()
   } finally { await ctx.fiber.dispose(); await closeHost(); await rm(root, { recursive: true, force: true }) }
 })
@@ -344,7 +278,6 @@ test('unrelated native reads wait for slow automatic discovery without cancellin
   try {
     for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess]) await ctx.plugin(plugin)
     ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
-    ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] } } })
     ctx.loader.builtins.perse = Main
     await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper, timeoutMs: 2000, previewRefreshIntervalMs: 1000, allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }] } })
     await ctx.loader.await(); await waitFor(() => ctx.tools.get('cua'))
@@ -396,14 +329,6 @@ test('unrelated native reads wait for slow automatic discovery without cancellin
     const started = Date.now()
     assert.equal((await call('getCapabilities')).isError, false)
     assert.ok(Date.now() - started < 3400, 'passive read exceeded its configured wait and cleanup budget')
-    const beforeRevoke = (await events()).filter(row => row.event === 'slow-start').length
-    for (let i = 0; i < 300 && (await events()).filter(row => row.event === 'slow-start').length <= beforeRevoke; i++) await delay(10)
-    assert.ok((await events()).filter(row => row.event === 'slow-start').length > beforeRevoke)
-    const revokedRead = call('listApps').then(() => 'done', () => 'done')
-    await delay(5)
-    await ctx.loader.update('perse-cua', { config: { helperPath: helper, timeoutMs: 2000, previewRefreshIntervalMs: 1000, allowedApps: [] } })
-    assert.equal(await Promise.race([revokedRead, delay(500).then(() => 'timeout')]), 'done')
-    await ctx.loader.await()
     const otherApp = await call('getApp', { selector: 'Fixture' }, other); assert.equal(otherApp.isError, false, JSON.stringify(otherApp))
     const otherController = new AbortController(); const otherReader = ctx.get('perseCuaView').watch(other.id, otherController.signal)[Symbol.asyncIterator]()
     await otherReader.next()
@@ -419,117 +344,6 @@ test('unrelated native reads wait for slow automatic discovery without cancellin
   } finally { await ctx.fiber.dispose(); await closeHost(); await rm(root, { recursive: true, force: true }) }
 })
 
-test('an unanswered application consent does not block an unrelated native read', { skip: process.platform !== 'darwin' }, async () => {
-  const root = await mkdtemp(join(tmpdir(), 'perse-preview-consent-read-'))
-  const helper = join(root, 'native-helper.mjs')
-  await writeFile(helper, await readFile(new URL('./fixtures/native-helper.mjs', import.meta.url)), { mode: 0o700 })
-  const closeHost = await startFixtureHost(helper), ctx = new Context()
-  const consent = Promise.withResolvers(), requested = Promise.withResolvers()
-  try {
-    for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess]) await ctx.plugin(plugin)
-    ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
-    ctx.provide('userQuestions', { async ask() { requested.resolve(); return consent.promise } })
-    ctx.loader.builtins.perse = Main
-    await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper } }); await ctx.loader.await()
-    await waitFor(() => ctx.tools.get('cua'))
-    const agent = { id: 'pending-consent', ctx }; ctx.agents.get = id => id === agent.id ? agent : undefined
-    let seq = 0
-    const call = (method, params) => ctx.tools.execute({ name: 'cua', arguments: { method, params }, agent, callId: `consent-${++seq}`, signal: new AbortController().signal })
-    const app = call('getApp', { selector: 'Fixture' })
-    await requested.promise
-    const read = call('getCapabilities', {})
-    const result = await Promise.race([read, delay(500).then(() => 'blocked')])
-    assert.notEqual(result, 'blocked', 'unrelated read waited for the human consent')
-    assert.equal(result.isError, false)
-    consent.resolve({ answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] })
-    assert.equal((await app).isError, false)
-  } finally {
-    consent.resolve({ answers: [{ id: 'cua-app-access', selected: ['Deny'] }] })
-    await ctx.fiber.dispose(); await closeHost(); await rm(root, { recursive: true, force: true })
-  }
-})
-
-test('pending consent for another app does not stop authorized previews', { skip: process.platform !== 'darwin' }, async () => {
-  const root = await mkdtemp(join(tmpdir(), 'perse-preview-pending-consent-'))
-  const helper = join(root, 'native-helper.mjs')
-  const source = (await readFile(new URL('./fixtures/native-helper.mjs', import.meta.url), 'utf8')).replace("      if (!['Fixture', 'test.fixture', '9'].includes(params.selector))", "      if (params.selector === 'Second') return { ...app, appHandle: `${scope}-second`, name: 'Second', authorization: { id: 'b'.repeat(64), name: 'Second', executablePath: '/fixture/second', persistable: false } }\n      if (!['Fixture', 'test.fixture', '9'].includes(params.selector))")
-  await writeFile(helper, source, { mode: 0o700 }); await writeFile(join(root, 'observe-helper'), '')
-  const closeHost = await startFixtureHost(helper), ctx = new Context()
-  const consent = Promise.withResolvers(), requested = Promise.withResolvers()
-  try {
-    for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess]) await ctx.plugin(plugin)
-    ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
-    ctx.provide('userQuestions', { async ask() { requested.resolve(); return consent.promise } })
-    ctx.loader.builtins.perse = Main
-    await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper, previewRefreshIntervalMs: 1000, allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }] } }); await ctx.loader.await()
-    await waitFor(() => ctx.tools.get('cua'))
-    const agent = { id: 'pending-preview', ctx }; ctx.agents.get = id => id === agent.id ? agent : undefined
-    let seq = 0
-    const call = (method, params) => ctx.tools.execute({ name: 'cua', arguments: { method, params }, agent, callId: `pending-${++seq}`, signal: new AbortController().signal })
-    assert.equal((await call('getApp', { selector: 'Fixture' })).isError, false)
-    const controller = new AbortController(), reader = ctx.get('perseCuaView').watch(agent.id, controller.signal)[Symbol.asyncIterator]()
-    await reader.next()
-    const selection = call('getApp', { selector: 'Second' }); await requested.promise
-    let observed = []
-    for (let i = 0; i < 400; i++) {
-      observed = (await readFile(join(root, 'helper-events.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse)
-      if (observed.some(row => row.method === 'screenshot' && row.params.displayOnly)) break
-      await delay(10)
-    }
-    assert.ok(observed.some(row => row.method === 'screenshot' && row.params.displayOnly), 'pending consent blocked the authorized preview')
-    consent.resolve({ answers: [{ id: 'cua-app-access', selected: ['Deny'] }] }); await selection
-    controller.abort(); await reader.return()
-  } finally {
-    consent.resolve({ answers: [{ id: 'cua-app-access', selected: ['Deny'] }] })
-    await ctx.fiber.dispose(); await closeHost(); await rm(root, { recursive: true, force: true })
-  }
-})
-
-test('consent for a pending launch leaves other previews running and cancels them before launch', { skip: process.platform !== 'darwin' }, async () => {
-  const root = await mkdtemp(join(tmpdir(), 'perse-preview-launch-'))
-  const helper = join(root, 'native-helper.mjs')
-  const source = (await readFile(new URL('./fixtures/native-helper.mjs', import.meta.url), 'utf8'))
-    .replace("    input.on('line', line => {", "    const delayed = new Map()\n    input.on('line', line => {")
-    .replace("      if (request.type === 'cancel') {", "      if (request.type === 'cancel') {\n        const timer = delayed.get(request.id)\n        if (timer) { clearTimeout(timer); delayed.delete(request.id); scopedRecord('slow-cancel', { id: request.id }); socket.write(JSON.stringify({ id: request.id, error: { code: 'NATIVE_CANCELLED', message: 'cancelled' } }) + '\\n') }")
-    .replace('      let response\n      try {', "      if (request.method === 'listWindows' && request.params.displayOnly) {\n        scopedRecord('slow-start', { id: request.id })\n        const timer = setTimeout(() => { delayed.delete(request.id); socket.write(JSON.stringify({ id: request.id, result: call(request.id, request.method, request.params) }) + '\\n') }, 250)\n        delayed.set(request.id, timer); return\n      }\n      let response\n      try {")
-    .replace("      if (!['Fixture', 'test.fixture', '9'].includes(params.selector))", "      if (params.selector === 'Pending') return { ...app, pid: null, appHandle: `${scope}-pending`, name: 'Pending', authorization: { id: 'b'.repeat(64), name: 'Pending', executablePath: '/fixture/pending', persistable: false } }\n      if (!['Fixture', 'test.fixture', '9'].includes(params.selector))")
-    .replace("    if (!acquired || params.appHandle !== app.appHandle)", "    if (method === 'launchApp') return { ...app, appHandle: params.appHandle, name: 'Pending' }\n    if (!acquired || params.appHandle !== app.appHandle)")
-  await writeFile(helper, source, { mode: 0o700 }); await writeFile(join(root, 'observe-helper'), '')
-  const closeHost = await startFixtureHost(helper), ctx = new Context()
-  const consent = Promise.withResolvers(), requested = Promise.withResolvers()
-  const events = async () => (await readFile(join(root, 'helper-events.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse)
-  try {
-    for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess]) await ctx.plugin(plugin)
-    ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
-    ctx.provide('userQuestions', { async ask() { requested.resolve(); return consent.promise } })
-    ctx.loader.builtins.perse = Main
-    await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper, previewRefreshIntervalMs: 1000, allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }] } }); await ctx.loader.await()
-    await waitFor(() => ctx.tools.get('cua'))
-    const agent = { id: 'launch-preview', ctx }; ctx.agents.get = id => id === agent.id ? agent : undefined
-    let seq = 0
-    const call = (method, params) => ctx.tools.execute({ name: 'cua', arguments: { method, params }, agent, callId: `launch-${++seq}`, signal: new AbortController().signal })
-    assert.equal((await call('getApp', { selector: 'Fixture' })).isError, false)
-    const controller = new AbortController(), reader = ctx.get('perseCuaView').watch(agent.id, controller.signal)[Symbol.asyncIterator]()
-    await reader.next()
-    const selection = call('getApp', { selector: 'Pending' }); await requested.promise
-    for (let i = 0; i < 400 && !(await events()).some(row => row.method === 'screenshot' && row.params.displayOnly); i++) await delay(10)
-    let observed = await events()
-    assert.ok(observed.some(row => row.method === 'screenshot' && row.params.displayOnly), 'consent blocked an authorized app preview')
-    const starts = observed.filter(row => row.event === 'slow-start').length
-    for (let i = 0; i < 300 && (await events()).filter(row => row.event === 'slow-start').length <= starts; i++) await delay(10)
-    assert.ok((await events()).filter(row => row.event === 'slow-start').length > starts)
-    consent.resolve({ answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] })
-    const result = await selection; assert.equal(result.isError, false, JSON.stringify(result))
-    observed = await events()
-    assert.ok(observed.some(row => row.event === 'slow-cancel'))
-    assert.ok(observed.some(row => row.method === 'launchApp'))
-    controller.abort(); await reader.return()
-  } finally {
-    consent.resolve({ answers: [{ id: 'cua-app-access', selected: ['Deny'] }] })
-    await ctx.fiber.dispose(); await closeHost(); await rm(root, { recursive: true, force: true })
-  }
-})
-
 test('a native read timing out in the request queue retains its native error code', { skip: process.platform !== 'darwin' }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'perse-preview-queue-timeout-'))
   const helper = join(root, 'native-helper.mjs')
@@ -540,7 +354,6 @@ test('a native read timing out in the request queue retains its native error cod
   try {
     for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess]) await ctx.plugin(plugin)
     ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
-    ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] } } })
     ctx.loader.builtins.perse = Main
     await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper, timeoutMs: 1500, graceMs: 3000, previewRefreshIntervalMs: 1000, allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }] } }); await ctx.loader.await()
     await waitFor(() => ctx.tools.get('cua'))
@@ -574,7 +387,6 @@ test('queued wait and native dispatch share one request timeout budget', { skip:
   try {
     for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess]) await ctx.plugin(plugin)
     ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
-    ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] } } })
     ctx.loader.builtins.perse = Main
     await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper, timeoutMs: 1500, graceMs: 2000, previewRefreshIntervalMs: 1000, allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }] } }); await ctx.loader.await()
     await waitFor(() => ctx.tools.get('cua'))
@@ -594,36 +406,6 @@ test('queued wait and native dispatch share one request timeout budget', { skip:
   } finally { await ctx.fiber.dispose(); await closeHost(); await rm(root, { recursive: true, force: true }) }
 })
 
-test('revocation while a window request is queued prevents native dispatch', { skip: process.platform !== 'darwin' }, async () => {
-  const root = await mkdtemp(join(tmpdir(), 'perse-preview-queued-revoke-'))
-  const helper = join(root, 'native-helper.mjs')
-  const source = (await readFile(new URL('./fixtures/native-helper.mjs', import.meta.url), 'utf8'))
-    .replace('      let response\n      try {', "      if (request.method === 'getCapabilities') {\n        scopedRecord('slow-start', { id: request.id })\n        setTimeout(() => socket.write(JSON.stringify({ id: request.id, result: call(request.id, request.method, request.params) }) + '\\n'), 400); return\n      }\n      let response\n      try {")
-  await writeFile(helper, source, { mode: 0o700 }); await writeFile(join(root, 'observe-helper'), '')
-  const closeHost = await startFixtureHost(helper), ctx = new Context()
-  try {
-    for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess]) await ctx.plugin(plugin)
-    ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
-    ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] } } })
-    ctx.loader.builtins.perse = Main
-    const config = { helperPath: helper, allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }] }
-    await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config }); await ctx.loader.await(); await waitFor(() => ctx.tools.get('cua'))
-    const agent = { id: 'queued-revoke', ctx }; ctx.agents.get = id => id === agent.id ? agent : undefined
-    let seq = 0
-    const call = (method, params) => ctx.tools.execute({ name: 'cua', arguments: { method, params }, agent, callId: `revoke-${++seq}`, signal: new AbortController().signal })
-    const app = await call('getApp', { selector: 'Fixture' }); assert.equal(app.isError, false)
-    const activeRead = call('getCapabilities', {})
-    const events = async () => (await readFile(join(root, 'helper-events.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse)
-    for (let i = 0; i < 100 && !(await events()).some(row => row.event === 'slow-start'); i++) await delay(5)
-    assert.ok((await events()).some(row => row.event === 'slow-start'))
-    const queued = call('getState', { appHandle: app.value.appHandle, windowId: 7 })
-    await delay(10); await ctx.loader.update('perse-cua', { config: { ...config, allowedApps: [] } })
-    assert.equal((await queued).isError, true)
-    await activeRead
-    assert.equal((await events()).some(row => row.method === 'getState'), false)
-  } finally { await ctx.fiber.dispose(); await closeHost(); await rm(root, { recursive: true, force: true }) }
-})
-
 test('preview queue expiry keeps the last frame and retries after the connection is free', { skip: process.platform !== 'darwin' }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'perse-preview-queue-frame-'))
   const helper = join(root, 'native-helper.mjs')
@@ -634,7 +416,6 @@ test('preview queue expiry keeps the last frame and retries after the connection
   try {
     for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess]) await ctx.plugin(plugin)
     ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
-    ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] } } })
     ctx.loader.builtins.perse = Main
     await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper, timeoutMs: 1500, screenshotTimeoutMs: 250, previewRefreshIntervalMs: 1000, allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }] } })
     await ctx.loader.await(); await waitFor(() => ctx.tools.get('cua'))
@@ -669,7 +450,7 @@ test('preview queue expiry keeps the last frame and retries after the connection
   } finally { await ctx.fiber.dispose(); await closeHost(); await rm(root, { recursive: true, force: true }) }
 })
 
-test('application discovery access failures clear only its frames and recover without bypassing revocation', { skip: process.platform !== 'darwin' }, async () => {
+test('application discovery failures clear affected frames and recover', { skip: process.platform !== 'darwin' }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'perse-preview-list-access-')), helper = join(root, 'native-helper.mjs')
   const source = (await readFile(new URL('./fixtures/native-helper.mjs', import.meta.url), 'utf8'))
     .replace("      if (!['Fixture', 'test.fixture', '9'].includes(params.selector))", "      if (params.selector === 'Second') return { ...app, appHandle: `${scope}-second`, name: 'Second', authorization: { id: 'b'.repeat(64), name: 'Second', executablePath: '/fixture/second', persistable: false } }\n      if (!['Fixture', 'test.fixture', '9'].includes(params.selector))")
@@ -680,7 +461,6 @@ test('application discovery access failures clear only its frames and recover wi
   try {
     for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess]) await ctx.plugin(plugin)
     ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
-    ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] } } })
     ctx.loader.builtins.perse = Main
     const config = { helperPath: helper, previewRefreshIntervalMs: 1000, allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }, { id: 'b'.repeat(64), name: 'Second', executablePath: '/fixture/second' }] }
     await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config }); await ctx.loader.await(); await waitFor(() => ctx.tools.get('cua'))
@@ -706,75 +486,6 @@ test('application discovery access failures clear only its frames and recover wi
       if (code === 'PERMISSION_DENIED') assert.equal((await call('getCapabilities', {})).isError, false)
       await until(() => first()?.image && !first().discoveryUnavailable && second()?.image && !second().discoveryUnavailable)
     }
-    await ctx.loader.update('perse-cua', { config: { ...config, allowedApps: [] } }); await ctx.loader.await()
-    await until(() => latest.length === 0)
-    controller.abort(); await reader.return(); await consume
-  } finally { await ctx.fiber.dispose(); await closeHost(); await rm(root, { recursive: true, force: true }) }
-})
-
-test('denying an unselected app clears previews on the connection it invalidates', { skip: process.platform !== 'darwin' }, async () => {
-  const root = await mkdtemp(join(tmpdir(), 'perse-preview-denied-new-')), helper = join(root, 'native-helper.mjs')
-  const source = (await readFile(new URL('./fixtures/native-helper.mjs', import.meta.url), 'utf8')).replace("      if (!['Fixture', 'test.fixture', '9'].includes(params.selector))", "      if (params.selector === 'Second') return { ...app, appHandle: `${scope}-second`, name: 'Second', authorization: { id: 'b'.repeat(64), name: 'Second', executablePath: '/fixture/second', persistable: false } }\n      if (!['Fixture', 'test.fixture', '9'].includes(params.selector))")
-  await writeFile(helper, source, { mode: 0o700 }); await writeFile(join(root, 'observe-helper'), '')
-  const closeHost = await startFixtureHost(helper), ctx = new Context()
-  try {
-    for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess]) await ctx.plugin(plugin)
-    ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
-    ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: ['Deny'] }] } } })
-    ctx.loader.builtins.perse = Main
-    await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper, previewRefreshIntervalMs: 1000, allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }] } }); await ctx.loader.await(); await waitFor(() => ctx.tools.get('cua'))
-    const agent = { id: 'deny-new', ctx }; ctx.agents.get = id => id === agent.id ? agent : undefined
-    let seq = 0
-    const call = (method, params) => ctx.tools.execute({ name: 'cua', arguments: { method, params }, agent, callId: `deny-new-${++seq}`, signal: new AbortController().signal })
-    assert.equal((await call('getApp', { selector: 'Fixture' })).isError, false)
-    const controller = new AbortController(), reader = ctx.get('perseCuaView').watch(agent.id, controller.signal)[Symbol.asyncIterator]()
-    let latest = []; const consume = (async () => { for await (const items of { [Symbol.asyncIterator]: () => reader }) latest = items })()
-    for (let i = 0; i < 500 && !latest[0]?.image; i++) await delay(10)
-    assert.ok(latest[0]?.image)
-    assert.equal((await call('getApp', { selector: 'Second' })).isError, true)
-    for (let i = 0; i < 40 && latest.length; i++) await delay(5)
-    assert.deepEqual(latest, [])
-    controller.abort(); await reader.return(); await consume
-  } finally { await ctx.fiber.dispose(); await closeHost(); await rm(root, { recursive: true, force: true }) }
-})
-
-test('revoking another agent does not cancel an authorized preview in flight', { skip: process.platform !== 'darwin' }, async () => {
-  const root = await mkdtemp(join(tmpdir(), 'perse-preview-other-revoke-')), helper = join(root, 'native-helper.mjs')
-  const source = (await readFile(new URL('./fixtures/native-helper.mjs', import.meta.url), 'utf8'))
-    .replace("    input.on('line', line => {", "    const delayed = new Map()\n    input.on('line', line => {")
-    .replace("      if (request.type === 'cancel') {", "      if (request.type === 'cancel') {\n        const timer = delayed.get(request.id); if (timer) { clearTimeout(timer); delayed.delete(request.id); scopedRecord('preview-cancelled', { id: request.id }); socket.write(JSON.stringify({ id: request.id, error: { code: 'NATIVE_CANCELLED', message: 'cancelled' } }) + '\\n') }")
-    .replace('      let response\n      try {', "      if (connectionId === 2 && request.method === 'listWindows' && request.params.displayOnly) {\n        scopedRecord('preview-start', { id: request.id }); const timer = setTimeout(() => { delayed.delete(request.id); socket.write(JSON.stringify({ id: request.id, result: call(request.id, request.method, request.params) }) + '\\n') }, 600); delayed.set(request.id, timer); return\n      }\n      let response\n      try {")
-    .replace("      if (!['Fixture', 'test.fixture', '9'].includes(params.selector))", "      if (params.selector === 'Second') { acquired = true; return { ...app, appHandle: `${scope}-second`, name: 'Second', authorization: { id: 'b'.repeat(64), name: 'Second', executablePath: '/fixture/second', persistable: true } } }\n      if (!['Fixture', 'test.fixture', '9'].includes(params.selector))")
-    .replace("    if (!acquired || params.appHandle !== app.appHandle)", "    if (!acquired || ![app.appHandle, `${scope}-second`].includes(params.appHandle))")
-  await writeFile(helper, source, { mode: 0o700 }); await writeFile(join(root, 'observe-helper'), '')
-  const closeHost = await startFixtureHost(helper), ctx = new Context()
-  try {
-    for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess]) await ctx.plugin(plugin)
-    ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
-    ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] } } })
-    ctx.loader.builtins.perse = Main
-    const a = { id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }, b = { id: 'b'.repeat(64), name: 'Second', executablePath: '/fixture/second' }
-    const config = { helperPath: helper, previewRefreshIntervalMs: 1000, timeoutMs: 3000, allowedApps: [a, b] }
-    await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config }); await ctx.loader.await(); await waitFor(() => ctx.tools.get('cua'))
-    const agentA = { id: 'other-a', ctx }, agentB = { id: 'other-b', ctx }; ctx.agents.get = id => id === agentA.id ? agentA : id === agentB.id ? agentB : undefined
-    let seq = 0
-    const call = (agent, method, params) => ctx.tools.execute({ name: 'cua', arguments: { method, params }, agent, callId: `other-revoke-${++seq}`, signal: new AbortController().signal })
-    assert.equal((await call(agentA, 'getApp', { selector: 'Fixture' })).isError, false)
-    assert.equal((await call(agentB, 'getApp', { selector: 'Second' })).isError, false)
-    const controller = new AbortController(), reader = ctx.get('perseCuaView').watch(agentB.id, controller.signal)[Symbol.asyncIterator]()
-    let latest = []; const consume = (async () => { for await (const items of { [Symbol.asyncIterator]: () => reader }) latest = items })()
-    const events = async () => (await readFile(join(root, 'helper-events.jsonl'), 'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse)
-    for (let i = 0; i < 300 && !(await events()).some(row => row.event === 'preview-start'); i++) await delay(10)
-    assert.ok((await events()).some(row => row.event === 'preview-start'))
-    await ctx.loader.update('perse-cua', { config: { ...config, allowedApps: [b] } }); await ctx.loader.await()
-    await delay(700)
-    assert.equal((await events()).some(row => row.event === 'preview-cancelled'), false, 'revoking agent A interrupted agent B')
-    for (let i = 0; i < 500 && !latest.some(row => row.image); i++) await delay(10)
-    assert.ok(latest.some(row => row.image))
-    for (let i = 0; i < 500 && (await events()).filter(row => row.method === 'screenshot' && row.connection === 2).length < 2; i++) await delay(10)
-    const screenshots = (await events()).filter(row => row.method === 'screenshot' && row.connection === 2)
-    assert.ok(screenshots.length >= 2, 'agent B did not continue refreshing')
-    assert.ok(new Set(screenshots.map(row => row.params.windowId)).size >= 2, 'agent B did not refresh both windows')
     controller.abort(); await reader.return(); await consume
   } finally { await ctx.fiber.dispose(); await closeHost(); await rm(root, { recursive: true, force: true }) }
 })
@@ -788,7 +499,6 @@ test('same connection read does not hide an in-flight discovery permission failu
   try {
     for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess]) await ctx.plugin(plugin)
     ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
-    ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] } } })
     ctx.loader.builtins.perse = Main
     await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper, previewRefreshIntervalMs: 1000, allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }] } }); await ctx.loader.await(); await waitFor(() => ctx.tools.get('cua'))
     const agent = { id: 'same-client', ctx }; ctx.agents.get = id => id === agent.id ? agent : undefined
@@ -823,7 +533,6 @@ test('repeated model window listing shares turns with automatic preview', { skip
   try {
     for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess]) await ctx.plugin(plugin)
     ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
-    ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] } } })
     ctx.loader.builtins.perse = Main
     await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper, previewRefreshIntervalMs: 1000, allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }] } }); await ctx.loader.await(); await waitFor(() => ctx.tools.get('cua'))
     const agent = { id: 'list-fair', ctx }; ctx.agents.get = id => id === agent.id ? agent : undefined
@@ -877,7 +586,6 @@ test('queued relative input uses the latest observed bounds before native dispat
     const imageEntered = Promise.withResolvers(), releaseImage = Promise.withResolvers()
     ctx.provide('attachments', { async saveImages() { return [{ width: 1, height: 1 }] }, async readImageRequest() { if (holdImage) { imageEntered.resolve(); await releaseImage.promise }; return { data: Buffer.from([0]), width: 1, height: 1, mediaType: 'image/png' } } })
     ctx.provide('llm', { async resolveModelInfo() { return { inputModalities: ['image'] } }, imageRequestTarget() { return {} } })
-    ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] } } })
     ctx.loader.builtins.perse = Main
     await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper, allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }] } }); await ctx.loader.await(); await waitFor(() => ctx.tools.get('cua'))
     const agent = { id: 'queued-coordinate', ctx, options: { provider: 'fixture', model: 'fixture' }, session: { requestHeader() { return undefined } } }; ctx.agents.get = id => id === agent.id ? agent : undefined
@@ -945,15 +653,6 @@ test('queued relative input uses the latest observed bounds before native dispat
     await delay(10); cancelSignal.abort()
     assert.ok((await cancelled) instanceof Error); assert.equal((await cancelRefresh).isError, false)
     assert.equal((await events()).filter(event => event.method === 'click').length, 3)
-    const revokeStarts = (await events()).filter(event => event.event === 'resize-state-start').length
-    const revokeRefresh = call('getState', { appHandle: handle, windowId: 7 })
-    for (let i = 0; i < 200 && (await events()).filter(event => event.event === 'resize-state-start').length <= revokeStarts; i++) await delay(10)
-    assert.ok((await events()).filter(event => event.event === 'resize-state-start').length > revokeStarts)
-    const revoked = raw('click', { appHandle: handle, windowId: 7, x: 500, y: 500, relative: true }).catch(error => error)
-    await delay(10)
-    await ctx.loader.update('perse-cua', { config: { helperPath: helper, allowedApps: [] } })
-    assert.ok((await revoked) instanceof Error); await revokeRefresh
-    assert.equal((await events()).filter(event => event.method === 'click').length, 3)
   } finally { await ctx.fiber.dispose(); await closeHost(); await rm(root, { recursive: true, force: true }) }
 })
 
@@ -967,7 +666,6 @@ test('automatic provider previews refresh both windows while enumeration order c
   try {
     for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess]) await ctx.plugin(plugin)
     ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
-    ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] } } })
     ctx.loader.builtins.perse = Main
     await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper, previewRefreshIntervalMs: 1000, allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }] } }); await ctx.loader.await(); await waitFor(() => ctx.tools.get('cua'))
     const agent = { id: 'rotation', ctx }; ctx.agents.get = id => id === agent.id ? agent : undefined
@@ -997,7 +695,6 @@ test('automatically removed window IDs can be reused at a different size', { ski
   try {
     for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess]) await ctx.plugin(plugin)
     ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
-    ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] } } })
     ctx.loader.builtins.perse = Main
     await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper, previewRefreshIntervalMs: 1000, allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }] } }); await ctx.loader.await(); await waitFor(() => ctx.tools.get('cua'))
     const agent = { id: 'reuse', ctx }; ctx.agents.get = id => id === agent.id ? agent : undefined
@@ -1023,7 +720,6 @@ test('slow preview subscriber receives the click frame before the newer capture'
   try {
     for (const plugin of [Loader, Tools, Agents, Prompt, LocalSubprocess]) await ctx.plugin(plugin)
     ctx.provide('logger', { debug() {}, info() {}, warn() {}, error() {} })
-    ctx.provide('userQuestions', { async ask() { return { answers: [{ id: 'cua-app-access', selected: ['Allow for this task'] }] } } })
     ctx.loader.builtins.perse = Main
     await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: { helperPath: helper, allowedApps: [{ id: 'a'.repeat(64), name: 'Fixture', executablePath: '/fixture/app' }] } })
     await ctx.loader.await()

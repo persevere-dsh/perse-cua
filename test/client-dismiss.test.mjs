@@ -7,6 +7,7 @@ import { Context } from '@deepseek-ai/cordis'
 const source = readFileSync(new URL('../packages/perse-cua/client/index.jsx', import.meta.url), 'utf8')
   .replace("import React, { useEffect, useRef, useState } from 'react'", 'const { React, useEffect, useRef, useState } = globalThis.__perseDismissReact')
   .replace("import remote from '../lib/typert.remote-client.js'", 'const remote = {}')
+    .replace("import theme from '../cursor-theme.json'", `const theme = ${readFileSync(new URL('../packages/perse-cua/cursor-theme.json', import.meta.url), 'utf8')}`)
 
 test('closing a preview accepts a void result and reports a rejected dismissal', async () => {
   const hooks = []; const cleanups = []; let cursor = 0
@@ -24,7 +25,7 @@ test('closing a preview accepts a void result and reports a rejected dismissal',
     async dismiss(session, id) { calls.push([session, id]); if (reject) throw new Error('offline') },
   }
   ctx.provide('locale', { register() { return () => {} } })
-  ctx.provide('slots', { inject(_name, fn) { return fn() }, register(_options, view) { View = view; return () => {} } })
+  ctx.provide('slots', { inject(_name, fn) { return fn() }, register(options, view) { if (options.id === 'perse-cua.driving') View = view; return () => {} } })
   ctx.provide('remote', { $mount: async () => () => {}, perseCuaView: service })
   ctx.provide('remote.perseCuaView', service)
   const plugin = ctx.plugin({ name: 'preview-dismiss-test', inject: client.inject, apply: client.apply }); await plugin.await()

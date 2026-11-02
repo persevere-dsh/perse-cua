@@ -55,6 +55,7 @@ final class Fixture: NSObject, NSApplicationDelegate {
     var initialFront = NSWorkspace.shared.frontmostApplication?.processIdentifier
     var cursorChanged = false
     var frontChanged = false
+    var readiness: FixtureWindowStability?
     init(path: String) { statePath = path }
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard NSEvent.mouseLocation == initialCursor,
@@ -76,9 +77,10 @@ final class Fixture: NSObject, NSApplicationDelegate {
         }
         window.level = .normal
         window.orderBack(nil)
-        verifyOrderedWindow(attemptsRemaining: 100)
+        readiness = FixtureWindowStability(started: ProcessInfo.processInfo.systemUptime)
+        verifyOrderedWindow()
     }
-    func verifyOrderedWindow(attemptsRemaining: Int) {
+    func verifyOrderedWindow() {
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == initialFront,
               NSEvent.mouseLocation == initialCursor,
               let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
@@ -92,20 +94,34 @@ final class Fixture: NSObject, NSApplicationDelegate {
                   let layer = item[kCGWindowLayer as String] as? Int else { return nil }
             return WindowOrderEntry(id: id, pid: pid, layer: layer)
         }
-        // orderBack is asynchronous with respect to WindowServer enumeration.
-        // Wait only for our window to appear; never relax the ordering check.
-        if !entries.contains(where: { $0.id == window.windowNumber && $0.pid == getpid() }), attemptsRemaining > 0 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
-                self?.verifyOrderedWindow(attemptsRemaining: attemptsRemaining - 1)
-            }
-            return
+        // WindowServer ordering and frame updates can complete after orderBack.
+        let row = windows.first { item in
+            (item[kCGWindowNumber as String] as? Int) == window.windowNumber &&
+                (item[kCGWindowOwnerPID as String] as? Int) == Int(getpid())
         }
-        guard entries.count == windows.count,
-              fixtureIsBehindOtherNormalWindows(entries, fixtureID: window.windowNumber, fixturePID: Int(getpid())) else {
+        if row != nil {
+            guard entries.count == windows.count,
+                  fixtureIsBehindOtherNormalWindows(entries, fixtureID: window.windowNumber, fixturePID: Int(getpid())) else {
+                window.orderOut(nil)
+                let order = entries.map { "\($0.id):\($0.pid):\($0.layer)" }.joined(separator: ",")
+                fputs("Cannot verify fixture window is behind other applications: fixtureID=\(window.windowNumber), fixturePID=\(getpid()), entries=\(order)\n", stderr)
+                exit(1)
+            }
+        }
+        let raw = row?[kCGWindowBounds as String] as? [String: NSNumber]
+        let bounds = raw.flatMap { values -> CGRect? in
+            guard let x = values["X"], let y = values["Y"], let width = values["Width"], let height = values["Height"] else { return nil }
+            return CGRect(x: x.doubleValue, y: y.doubleValue, width: width.doubleValue, height: height.doubleValue)
+        }
+        switch readiness?.observe(bounds, now: ProcessInfo.processInfo.systemUptime) ?? .timedOut {
+        case .waiting:
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in self?.verifyOrderedWindow() }
+            return
+        case .timedOut:
             window.orderOut(nil)
-            let order = entries.map { "\($0.id):\($0.pid):\($0.layer)" }.joined(separator: ",")
-            fputs("Cannot verify fixture window is behind other applications: fixtureID=\(window.windowNumber), fixturePID=\(getpid()), entries=\(order)\n", stderr)
+            fputs("Fixture window geometry did not stabilize before startup deadline\n", stderr)
             exit(1)
+        case .ready: break
         }
         persist()
         timer = Timer.scheduledTimer(withTimeInterval: 0.02, repeats: true) { [weak self] _ in

@@ -103,13 +103,16 @@ private final class CancelAfterFirstStep: @unchecked Sendable {
     let requests = CursorRequestOwnership()
     var visible = true
     let hide = { visible = false }
-    let first = requests.begin(method: "click", hide: hide)
-    #expect(!visible)
-    visible = true
-    let read = requests.begin(method: "screenshot", hide: hide)
+    var interruptions = 0
+    let interrupt = { interruptions += 1 }
+    let first = requests.begin(method: "click", interrupt: interrupt)
+    #expect(interruptions == 1)
+    #expect(visible)
+    let read = requests.begin(method: "screenshot", interrupt: interrupt)
     requests.fail(read, hide: hide)
     #expect(visible)
-    let second = requests.begin(method: "drag", hide: hide)
+    let second = requests.begin(method: "drag", interrupt: interrupt)
+    #expect(interruptions == 2)
     visible = true
     requests.fail(first, hide: hide)
     #expect(visible)
@@ -123,7 +126,7 @@ private final class CancelAfterFirstStep: @unchecked Sendable {
     #expect(visible)
 }
 
-@Test @MainActor func pointerOperationsKeepTheSchedulerUntilTheirDisplayCompletes() async throws {
+@Test @MainActor func schedulerSerializesPointerOperations() async throws {
     let scheduler = RequestScheduler(), cancellation = CancellationLatch()
     let (started, signalStarted) = AsyncStream<Void>.makeStream()
     let (release, signalRelease) = AsyncStream<Void>.makeStream()
@@ -153,87 +156,131 @@ private final class CancelAfterFirstStep: @unchecked Sendable {
     signalStarted.finish(); signalRelease.finish()
 }
 
-@Test @MainActor func cancelledCursorFadeCannotHideANewerCursor() async {
+@Test func cursorTrajectoryMatchesCuaSteadyReference() {
+    // Cua 85e2b13, fixtures/golden.json: signature_arc/steady/default/0.
+    let plan = planCursorMotion(from: CGPoint(x: 100, y: 100), angle: 0,
+        to: CGPoint(x: 600, y: 420), targetSize: CGSize(width: 80, height: 40))
+    let references: [(Double, CGFloat, CGFloat)] = [
+        (0.206478321, 218.923671451, 135.200798158),
+        (0.412956642, 455.879091382, 269.325042449),
+        (0.578139298, 581.670907706, 394.900806997),
+    ]
+    for (time, x, y) in references {
+        let actual = plan.sample(at: time).point
+        #expect(abs(actual.x - x) < 0.1)
+        #expect(abs(actual.y - y) < 0.1)
+    }
+    #expect(abs(plan.sample(at: 0.412956642).angle - (3.744855837 - .pi / 4)) < 0.01)
+    #expect(plan.sample(at: plan.arrivalT).point == CGPoint(x: 600, y: 420))
+    #expect(plan.samples.last?.point == CGPoint(x: 600, y: 420))
+    #expect(plan.samples.last?.angle == 0)
+}
+
+@Test func cursorTrajectoryIsDeterministicAndRespectsReducedMotionAndTargetSize() {
+    let from = CGPoint(x: 10, y: 10), to = CGPoint(x: 900, y: 300)
+    let first = planCursorMotion(from: from, angle: 0.4, to: to)
+    let again = planCursorMotion(from: from, angle: 0.4, to: to)
+    #expect(first.samples.map(\.point) == again.samples.map(\.point))
+    #expect(first.samples.map(\.angle) == again.samples.map(\.angle))
+    #expect(first.samples[0].angle == 0.4)
+    let large = planCursorMotion(from: from, angle: 0, to: to, targetSize: CGSize(width: 200, height: 200))
+    #expect(large.arrivalT < first.arrivalT)
+    let reduced = planCursorMotion(from: from, angle: 0, to: to, reducedMotion: true)
+    #expect(abs(reduced.arrivalT - 0.12) < 1e-9)
+    #expect(reduced.samples.allSatisfy { $0.angle == 0 })
+    #expect(reduced.sample(at: 0.06).point == CGPoint(x: 455, y: 155))
+}
+
+@Test @MainActor func cursorSessionColorsAreStable() {
+    let cursor = DispatchCursor()
+    #expect(cursor.colorHex == CursorTheme.colorHex)
+    cursor.setSessionName("named session")
+    let color = cursor.colorHex
+    cursor.setSessionName("named session")
+    #expect(cursor.colorHex == color)
+    cursor.setSessionName(nil)
+    #expect(cursor.colorHex == CursorTheme.colorHex)
+}
+
+@Test @MainActor func cursorMonitorHidesWhenRouteBecomesInvalid() async {
+    let route = WindowRoute(owner: ProcessIdentity(pid: 42, startedSeconds: 1, startedMicroseconds: 0),
+        windowID: 7, bounds: WindowBounds(x: 1, y: 2, width: 30, height: 40))
     let (started, signalStarted) = AsyncStream<Void>.makeStream()
     let (release, signalRelease) = AsyncStream<Void>.makeStream()
-    var hidden = false
-    let task = scheduleCursorFade(delay: {
+    var invalid: WindowRoute?
+    let task = scheduleCursorRouteMonitor(route: route, pause: {}, validate: { _ in
         signalStarted.yield()
-        for await _ in release { return }
-    }, onReady: { hidden = true })
+        for await _ in release { return false }
+        return false
+    }, onInvalid: { invalid = $0 })
+    var iterator = started.makeAsyncIterator()
+    _ = await iterator.next()
+    #expect(invalid == nil)
+    signalRelease.yield()
+    await task.value
+    #expect(invalid == route)
+    signalStarted.finish(); signalRelease.finish()
+}
+
+@Test @MainActor func cancelledCursorMonitorCannotHideANewerRoute() async {
+    let route = WindowRoute(owner: ProcessIdentity(pid: 42, startedSeconds: 1, startedMicroseconds: 0),
+        windowID: 7, bounds: WindowBounds(x: 1, y: 2, width: 30, height: 40))
+    let (started, signalStarted) = AsyncStream<Void>.makeStream()
+    let (release, signalRelease) = AsyncStream<Void>.makeStream()
+    var invalidated = false
+    let task = scheduleCursorRouteMonitor(route: route, pause: {}, validate: { _ in
+        signalStarted.yield()
+        for await _ in release { return false }
+        return false
+    }, onInvalid: { _ in invalidated = true })
     var iterator = started.makeAsyncIterator()
     _ = await iterator.next()
     task.cancel()
     signalRelease.yield()
-    signalRelease.finish()
     await task.value
-    signalStarted.finish()
-    #expect(!hidden)
-}
-
-@Test @MainActor func cursorFadeWaitsUntilTheDelayCompletes() async {
-    let (started, signalStarted) = AsyncStream<Void>.makeStream()
-    let (release, signalRelease) = AsyncStream<Void>.makeStream()
-    var fadeCount = 0
-    let task = scheduleCursorFade(delay: {
-        signalStarted.yield()
-        for await _ in release { return }
-    }, onReady: { fadeCount += 1 })
-    var iterator = started.makeAsyncIterator()
-    _ = await iterator.next()
-    #expect(fadeCount == 0)
-    signalRelease.yield()
-    signalRelease.finish()
-    await task.value
-    signalStarted.finish()
-    #expect(fadeCount == 1)
-}
-
-@Test @MainActor func newCursorCannotBeFadedByAnOlderInProgressFade() async {
-    let (started, signalStarted) = AsyncStream<Void>.makeStream()
-    let (release, signalRelease) = AsyncStream<Void>.makeStream()
-    let visibility = CursorVisibility(), revision = visibility.advance()
-    var opacity = 1.0
-    var writes = 0
-    let task = Task { @MainActor in
-        await animateCursorFade(steps: 2, pause: {
-            signalStarted.yield()
-            for await _ in release { return }
-        }, isCurrent: { visibility.isCurrent(revision) }, setAlpha: { opacity = $0; writes += 1 })
-    }
-    var iterator = started.makeAsyncIterator()
-    _ = await iterator.next()
-    signalRelease.yield()
-    _ = await iterator.next()
-    #expect(opacity == 0.5)
-    visibility.advance()
-    opacity = 1
-    signalRelease.yield()
-    await task.value
+    #expect(!invalidated)
     signalStarted.finish(); signalRelease.finish()
-    #expect(opacity == 1)
-    #expect(writes == 1)
 }
 
-@Test @MainActor func cancelledInProgressFadeCannotChangeOpacityAgain() async {
-    let (started, signalStarted) = AsyncStream<Void>.makeStream()
-    let (release, signalRelease) = AsyncStream<Void>.makeStream()
-    var opacity = 1.0
-    let task = Task { @MainActor in
-        await animateCursorFade(steps: 2, pause: {
-            signalStarted.yield()
-            for await _ in release { return }
-        }, isCurrent: { true }, setAlpha: { opacity = $0 })
+@Test func cursorShortAndLongMovesHaveCurvedIntermediatePositionsAndExactArrival() {
+    for distance: CGFloat in [40, 4000] {
+        let target = CGPoint(x: distance, y: 0)
+        let plan = planCursorMotion(from: .zero, angle: 0, to: target)
+        let middle = plan.sample(at: plan.arrivalT / 2)
+        #expect(middle.point.x > 0 && middle.point.x < distance)
+        #expect(middle.point.y < 0)
+        #expect(abs(middle.angle) > 0.01)
+        let arrivalIndex = plan.samples.firstIndex(where: { $0.t == plan.arrivalT })
+        #expect(arrivalIndex != nil)
+        if let arrivalIndex {
+            #expect(plan.samples[arrivalIndex].point == target)
+            #expect(plan.samples[..<arrivalIndex].allSatisfy { $0.point != target })
+        }
+        #expect(plan.arrivalT >= 0.4 && plan.arrivalT <= 1.1)
     }
-    var iterator = started.makeAsyncIterator()
-    _ = await iterator.next()
-    signalRelease.yield()
-    _ = await iterator.next()
-    #expect(opacity == 0.5)
-    task.cancel()
-    opacity = 1
-    signalRelease.yield()
-    await task.value
-    signalStarted.finish(); signalRelease.finish()
-    #expect(opacity == 1)
+    let short = planCursorMotion(from: .zero, angle: 0, to: CGPoint(x: 40, y: 0))
+    let long = planCursorMotion(from: .zero, angle: 0, to: CGPoint(x: 4000, y: 0))
+    #expect(short.arrivalT < long.arrivalT)
+}
+
+@Test func cursorReplansAReverseMoveFromTheDisplayedPositionAndAngle() {
+    let forward = planCursorMotion(from: .zero, angle: 0, to: CGPoint(x: 600, y: 0))
+    let interrupted = forward.sample(at: forward.arrivalT * 0.45)
+    #expect(interrupted.point.x > 0 && interrupted.point.x < 600)
+    #expect(interrupted.point.y < 0)
+    #expect(abs(interrupted.angle) > 0.01)
+    let destination = CGPoint(x: -200, y: 0)
+    let reverse = planCursorMotion(from: interrupted.point, angle: interrupted.angle, to: destination)
+    #expect(reverse.samples.first?.point == interrupted.point)
+    #expect(reverse.samples.first?.angle == interrupted.angle)
+    let middle = reverse.sample(at: reverse.arrivalT / 2)
+    #expect(middle.point.x < interrupted.point.x && middle.point.x > destination.x)
+    #expect(middle.point.y < interrupted.point.y)
+    #expect(abs(middle.angle - interrupted.angle) > 0.05)
+    let arrivalIndex = reverse.samples.firstIndex(where: { $0.t == reverse.arrivalT })
+    #expect(arrivalIndex != nil)
+    if let arrivalIndex {
+        #expect(reverse.samples[arrivalIndex].point == destination)
+        #expect(reverse.samples[..<arrivalIndex].allSatisfy { $0.point != destination })
+    }
 }

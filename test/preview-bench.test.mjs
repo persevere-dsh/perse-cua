@@ -58,7 +58,7 @@ test('bench starts from source without existing generated artifacts', async t =>
   await mkdir(join(root, 'test'), { recursive: true })
   await mkdir(join(root, 'packages/perse-cua'), { recursive: true })
   await mkdir(join(root, 'scripts'), { recursive: true })
-  for (const [from, to] of [['test/preview-bench', 'test/preview-bench'], ['packages/perse-cua/src', 'packages/perse-cua/src'], ['packages/perse-cua/client', 'packages/perse-cua/client'], ['packages/perse-cua/package.json', 'packages/perse-cua/package.json'], ['scripts/generate-remote.mjs', 'scripts/generate-remote.mjs'], ['tsconfig.base.json', 'tsconfig.base.json']]) {
+  for (const [from, to] of [['test/preview-bench', 'test/preview-bench'], ['packages/perse-cua/src', 'packages/perse-cua/src'], ['packages/perse-cua/client', 'packages/perse-cua/client'], ['packages/perse-cua/package.json', 'packages/perse-cua/package.json'], ['packages/perse-cua/cursor-theme.json', 'packages/perse-cua/cursor-theme.json'], ['scripts/generate-remote.mjs', 'scripts/generate-remote.mjs'], ['tsconfig.base.json', 'tsconfig.base.json']]) {
     await cp(join(source, from), join(root, to), { recursive: true })
   }
   await symlink(join(source, 'node_modules'), join(root, 'node_modules'), 'dir')
@@ -67,4 +67,24 @@ test('bench starts from source without existing generated artifacts', async t =>
   const bench = await startCleanBench()
   try { assert.equal((await fetch(new URL('bench.js', bench.url))).status, 200) }
   finally { await bench.close() }
+})
+
+
+test('fixture injects real trajectory and click while frames update independently', async () => {
+  const fixture = createPreviewFixture((title, frame) => `${title}:${frame}`)
+  const stream = fixture.watch('bench'), reader = stream[Symbol.asyncIterator]()
+  await reader.next()
+  fixture.move('bench/app/1')
+  const moving = (await reader.next()).value[0]
+  assert.ok(moving.motion.trajectory.samples.length > 2)
+  fixture.click('bench/app/1'); fixture.frame('bench/app/1')
+  const clicked = (await reader.next()).value[0]
+  assert.equal(clicked.image, 'Red:1')
+  assert.equal(clicked.motion.phase, 'click')
+  assert.deepEqual(clicked.motion.trajectory, moving.motion.trajectory)
+  fixture.move('bench/app/2')
+  assert.ok((await reader.next()).value[1].motion)
+  fixture.clearMotion('bench/app/1')
+  assert.equal((await reader.next()).value[0].motion, undefined)
+  await stream.dispose(); await reader.return()
 })

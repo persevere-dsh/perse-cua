@@ -119,13 +119,13 @@ struct WindowBounds: Equatable, Sendable {
     }
 }
 
-struct WindowRoute: Sendable {
+struct WindowRoute: Equatable, Sendable {
     let owner: ProcessIdentity
     let windowID: UInt32
     let bounds: WindowBounds
 }
 
-struct WindowPoint: Sendable {
+struct WindowPoint: Equatable, Sendable {
     let x: Double
     let y: Double
 }

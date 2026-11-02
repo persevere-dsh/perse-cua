@@ -283,7 +283,7 @@ test('a denied preview capture clears an earlier image', async () => {
   preview.close()
 })
 
-test('revoking an application clears all windows on the invalidated connection', async () => {
+test('disposing an agent clears all its windows', async () => {
   const listeners = new Map(), windows = new Map(), requests = []
   const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
   const view = { setDismissHandler() {}, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
@@ -294,7 +294,7 @@ test('revoking an application clears all windows on the invalidated connection',
   emit('getState', { appHandle: 'app', windowId: 1 }, { windowId: 1, windows: [{ windowId: 1, isOnScreen: true }] })
   emit('getApp', {}, { appHandle: 'second', name: 'Second' })
   emit('getState', { appHandle: 'second', windowId: 2 }, { windowId: 2, windows: [{ windowId: 2, isOnScreen: true }] })
-  preview.hooks.onRevoke(agent, 'app')
+  listeners.get('agent/disposed')({ agent })
   assert.equal(requests[0].signal.aborted, true)
   assert.equal(requests[1].signal.aborted, true)
   requests[1].resolve({ windowId: 2, data: 'YWJj', mimeType: 'image/png' })
@@ -321,7 +321,7 @@ test('a capture cancelled for a new native operation retains the last frame', as
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(windows.get('a/app/1').image, 'data:image/png;base64,YWJj')
   assert.equal(windows.get('a/app/1').previewUnavailable, false)
-  preview.hooks.onRevoke(agent, 'app')
+  listeners.get('agent/disposed')({ agent })
   assert.equal(windows.size, 0)
   await new Promise(resolve => setTimeout(resolve, 250))
   assert.equal(pending.length, 2)
@@ -345,7 +345,7 @@ test('a cancelled capture retries after operations settle and publishes the late
   for (let i = 0; i < 100 && !windows.get('a/app/1')?.image; i++) await new Promise(resolve => setTimeout(resolve, 10))
   assert.equal(calls, 3)
   assert.equal(windows.get('a/app/1').image, 'data:image/png;base64,bmV3')
-  preview.hooks.onRevoke(agent, 'app')
+  listeners.get('agent/disposed')({ agent })
   assert.equal(windows.size, 0)
   preview.close()
 })
@@ -430,7 +430,7 @@ test('subscribed native previews discover and refresh windows without model call
   preview.close()
 })
 
-test('revocation cancels an in-flight background capture and rejects its late frame', async () => {
+test('agent disposal cancels an in-flight background capture and rejects its late frame', async () => {
   const listeners = new Map(), windows = new Map(); let pending
   const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
   const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
@@ -440,7 +440,7 @@ test('revocation cancels an in-flight background capture and rejects its late fr
   view.watch('auto', true)
   for (let i = 0; i < 100 && !pending; i++) await new Promise(resolve => setTimeout(resolve, 5))
   assert.ok(pending)
-  preview.hooks.onRevoke(agent, 'app')
+  listeners.get('agent/disposed')({ agent })
   assert.equal(pending.signal.aborted, true)
   pending.resolve({ windowId: 1, data: 'YWJj', mimeType: 'image/png' })
   await new Promise(resolve => setTimeout(resolve, 25))
@@ -498,7 +498,7 @@ test('background discovery never runs when application selection is denied', asy
   preview.close()
 })
 
-test('three discovered windows refresh after resize and content changes until dismissal or revocation', async () => {
+test('three discovered windows refresh after resize and content changes until dismissal or agent disposal', async () => {
   const listeners = new Map(), windows = new Map(), calls = []
   const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
   const view = { setDismissHandler(fn) { this.dismiss = fn }, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
@@ -523,7 +523,7 @@ test('three discovered windows refresh after resize and content changes until di
   view.dismiss('auto/app/2'); view.remove('auto/app/2')
   await new Promise(resolve => setTimeout(resolve, 40))
   assert.equal(windows.has('auto/app/2'), false)
-  preview.hooks.onRevoke(agent, 'app')
+  listeners.get('agent/disposed')({ agent })
   assert.equal(windows.size, 0)
   preview.close()
 })
@@ -626,7 +626,7 @@ test('discovery failure is isolated to its app and clears after recovery', async
   } finally { preview.close() }
 })
 
-test('cancelled discovery after revocation cannot publish a failure or resume', async () => {
+test('cancelled discovery after agent disposal cannot publish a failure or resume', async () => {
   const listeners = new Map(), windows = new Map(); let pending
   const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
   const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
@@ -637,7 +637,7 @@ test('cancelled discovery after revocation cannot publish a failure or resume', 
     view.watch('a', true)
     for (let i = 0; i < 100 && !pending; i++) await new Promise(resolve => setTimeout(resolve, 5))
     assert.ok(pending)
-    preview.hooks.onRevoke(agent, 'app'); assert.equal(pending.signal.aborted, true)
+    listeners.get('agent/disposed')({ agent }); assert.equal(pending.signal.aborted, true)
     pending.reject(Object.assign(new Error('late'), { code: 'NATIVE_ERROR' }))
     await new Promise(resolve => setTimeout(resolve, 40))
     assert.equal(windows.size, 0)
@@ -702,7 +702,7 @@ test('discovery without windows shows one status until recovery', async () => {
   } finally { preview.close() }
 })
 
-test('background screenshot timeout keeps the last frame with a warning until recovery or revocation', async () => {
+test('background screenshot timeout keeps the last frame with a warning until recovery or agent disposal', async () => {
   const listeners = new Map(), windows = new Map(); let mode = 'success', count = 0, rejectPending
   const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
   const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
@@ -725,7 +725,7 @@ test('background screenshot timeout keeps the last frame with a warning until re
   assert.equal(windows.get('auto/app/1').image, 'data:image/png;base64,bmV3')
   mode = 'pending'
   for (let i = 0; i < 200 && !rejectPending; i++) await new Promise(resolve => setTimeout(resolve, 5))
-  assert.ok(rejectPending); preview.hooks.onRevoke(agent, 'app')
+  assert.ok(rejectPending); listeners.get('agent/disposed')({ agent })
   rejectPending(Object.assign(new Error('timed out'), { code: 'NATIVE_TIMEOUT' }))
   await new Promise(resolve => setImmediate(resolve)); assert.equal(windows.size, 0); assert.ok(count >= 4)
   preview.close()
@@ -824,7 +824,7 @@ test('another agent disposal or tool result does not interrupt an active preview
 })
 
 test('candidate eligibility is rechecked after another agent list completes', async () => {
-  for (const action of ['unwatch', 'rewatch', 'revoke', 'reauthorize', 'client-replace', 'dismiss']) {
+  for (const action of ['unwatch', 'rewatch', 'client-replace', 'dismiss']) {
     const listeners = new Map(), windows = new Map(); let pending, shots = 0, scanA = 0, scansB = 0, shotScans = []
     const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
     const view = { setDismissHandler(fn) { this.dismiss = fn }, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
@@ -842,30 +842,23 @@ test('candidate eligibility is rechecked after another agent list completes', as
     if (action === 'unwatch' || action === 'rewatch') {
       view.watch('b', false)
       if (action === 'rewatch') view.watch('b', true)
-    } else if (action === 'revoke' || action === 'reauthorize') {
-      preview.hooks.onRevoke(b, 'b-app')
-      if (action === 'reauthorize') {
-        emit(b, 'getApp', {}, { appHandle: 'b-app', name: 'B again' }); attachB()
-        emit(b, 'screenshot', { appHandle: 'b-app', windowId: 1 }, { windowId: 1, data: 'b2xk', mimeType: 'image/png' })
-      }
     } else if (action === 'client-replace') attachB()
     else { view.dismiss('b/b-app/1'); view.remove('b/b-app/1') }
     assert.equal(pending.signal.aborted, false, action)
     pending.resolve([])
     await new Promise(resolve => setTimeout(resolve, 5))
-    if (action === 'reauthorize') assert.ok(shotScans.every(count => count >= 2), 'old discovery was used for new authorization')
-    else assert.equal(shots, 0, action)
-    if (action === 'unwatch' || action === 'rewatch' || action === 'reauthorize' || action === 'client-replace') {
+    assert.equal(shots, 0, action)
+    if (action === 'unwatch' || action === 'rewatch' || action === 'client-replace') {
       if (action === 'unwatch') view.watch('b', true)
       for (let i = 0; i < 100 && shots === 0; i++) await new Promise(resolve => setTimeout(resolve, 5))
       assert.ok(shots > 0, 'resubscribing did not resume capture')
-    } else if (action === 'revoke') assert.equal(windows.has('b/b-app/1'), false)
+    }
     } finally { preview.close() }
   }
 })
 
-test('late capture errors cannot clear a newer watcher, application, window or client', async () => {
-  for (const change of ['watcher', 'application', 'window', 'client']) {
+test('late capture errors cannot clear a newer watcher, window or client', async () => {
+  for (const change of ['watcher', 'window', 'client']) {
     const listeners = new Map(), windows = new Map(); let pending
     const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
     const view = { setDismissHandler(fn) { this.dismiss = fn }, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
@@ -880,9 +873,8 @@ test('late capture errors cannot clear a newer watcher, application, window or c
       for (let i = 0; i < 100 && !pending; i++) await new Promise(resolve => setTimeout(resolve, 5))
       assert.ok(pending, change)
       if (change === 'watcher') { view.watch('a', false); view.watch('a', true) }
-      if (change === 'application') { preview.hooks.onRevoke(agent, 'app'); emit('getApp', {}, { appHandle: 'app', name: 'A again' }) }
       if (change === 'window') { view.dismiss('a/app/1'); view.remove('a/app/1') }
-      if (change === 'client' || change === 'application') preview.hooks.onClient(agent, async (_handle, windowId) => ({ windowId, data: 'bmV3', mimeType: 'image/png' }), list)
+      if (change === 'client') preview.hooks.onClient(agent, async (_handle, windowId) => ({ windowId, data: 'bmV3', mimeType: 'image/png' }), list)
       if (change !== 'client') emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'bmV3', mimeType: 'image/png' })
       pending.reject(Object.assign(new Error('old failure'), { code: 'PERMISSION_DENIED' }))
       await new Promise(resolve => setImmediate(resolve))
@@ -921,8 +913,8 @@ test('a replaced client never consumes old discovery success or failure', async 
   }
 })
 
-test('old discovery replies cannot alter a resubscribed or reauthorized application', async () => {
-  for (const change of ['watcher', 'application']) for (const outcome of ['success', 'error']) {
+test('old discovery replies cannot alter a resubscribed application', async () => {
+  for (const change of ['watcher']) for (const outcome of ['success', 'error']) {
     const listeners = new Map(), windows = new Map(); let pending, freshLists = 0
     const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
     const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
@@ -937,9 +929,7 @@ test('old discovery replies cannot alter a resubscribed or reauthorized applicat
       for (let i = 0; i < 100 && !pending; i++) await new Promise(resolve => setTimeout(resolve, 5))
       assert.ok(pending)
       if (change === 'watcher') { view.watch('a', false); view.watch('a', true) }
-      else { preview.hooks.onRevoke(agent, 'app'); emit('getApp', {}, { appHandle: 'app', name: 'A again' }) }
       preview.hooks.onClient(agent, async (_handle, windowId) => ({ windowId, data: 'bmV3', mimeType: 'image/png' }), async () => { freshLists++; return rows })
-      if (change === 'application') emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'b2xk', mimeType: 'image/png' })
       if (outcome === 'success') pending.resolve([{ ...rows[0], title: 'Old title' }])
       else pending.reject(Object.assign(new Error('old permission'), { code: 'PERMISSION_DENIED' }))
       await new Promise(resolve => setTimeout(resolve, 5))
@@ -1077,7 +1067,7 @@ test('automatic previews rotate by window identity when discovery order changes'
   } finally { preview.close() }
 })
 
-test('a failing capture cannot starve another application and revoked sessions stop', async () => {
+test('a failing capture cannot starve another application and disposed sessions stop', async () => {
   const listeners = new Map(), windows = new Map(), attempts = []
   const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
   const view = { setDismissHandler() {}, setWatchHandler(fn) { this.watch = fn }, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
@@ -1093,7 +1083,7 @@ test('a failing capture cannot starve another application and revoked sessions s
     }
     for (let i = 0; i < 200 && attempts.length < 6; i++) await new Promise(resolve => setTimeout(resolve, 5))
     assert.deepEqual(attempts.slice(0, 6), ['a', 'b', 'a', 'b', 'a', 'b'])
-    preview.hooks.onRevoke(a, 'app'); view.watch('a', false)
+    listeners.get('agent/disposed')({ agent: a }); view.watch('a', false)
     const cutoff = attempts.length
     for (let i = 0; i < 200 && attempts.length < cutoff + 3; i++) await new Promise(resolve => setTimeout(resolve, 5))
     assert.deepEqual(attempts.slice(cutoff, cutoff + 3), ['b', 'b', 'b'])
@@ -1209,4 +1199,89 @@ test('tool-local cancellation permits a later call in the same turn and old turn
   result(lateState, { windowId: 2 })
   assert.equal(windows.has('a/late/2'), false)
   preview.close()
+})
+
+test('visual trajectories stay with their connection, process, window and capture geometry', async () => {
+  const listeners = new Map(), windows = new Map()
+  const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+  const view = { setDismissHandler() {}, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) }, invalidatePoint() {} }
+  const preview = observeNative(ctx, view), agent = { id: 'motion' }
+  const emit = (method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  const bounds = { x: 100, y: 200, width: 800, height: 600 }
+  const row = windowId => ({ windowId, title: 'Window', bounds, isOnScreen: true, onCurrentSpace: true })
+  const event = (sequence, overrides = {}) => ({ type: 'visual', requestId: 'request', appHandle: 'app', windowId: 1, process: { pid: 12, startedSeconds: 1, startedMicroseconds: 2 }, geometry: bounds, sequence, color: '#5EC0E8', trajectory: { samples: [{ t: 0, x: 0.1, y: 0.2, angle: 0 }, { t: 0.5, x: 0.3, y: 0.4, angle: 0.1 }], arrivalT: 0.5 }, elapsedMs: 0, phase: 'move', ...overrides })
+  const capture = async (_handle, windowId) => ({ windowId, data: 'YWJj', mimeType: 'image/png', bounds })
+  try {
+    preview.hooks.onClient(agent, capture, async () => [])
+    emit('getApp', {}, { appHandle: 'app', name: 'Editor' })
+    emit('getState', { appHandle: 'app', windowId: 1 }, { windowId: 1, windows: [row(1), row(2)] })
+    emit('screenshot', { appHandle: 'app', windowId: 1 }, { windowId: 1, data: 'YWJj', mimeType: 'image/png', bounds })
+    preview.hooks.onVisual(agent, event(1))
+    assert.equal(windows.get('motion/app/1').motion.sequence, 1)
+    preview.hooks.onVisual(agent, event(1, { phase: 'click' }))
+    assert.equal(windows.get('motion/app/1').motion.phase, 'move')
+    preview.hooks.onVisual(agent, event(2, { geometry: { ...bounds, x: 101 } }))
+    assert.equal(windows.get('motion/app/1').motion, undefined)
+    preview.hooks.onVisual(agent, event(3, { windowId: 2 }))
+    assert.equal(windows.get('motion/app/2')?.motion, undefined)
+    preview.hooks.onVisual(agent, event(4))
+    assert.equal(windows.get('motion/app/1').motion.sequence, 4)
+    preview.hooks.onVisual(agent, event(5, { process: { pid: 12, startedSeconds: 2, startedMicroseconds: 2 } }))
+    assert.equal(windows.get('motion/app/1').motion, undefined)
+    preview.hooks.onVisual(agent, event(6))
+    emit('listWindows', { appHandle: 'app' }, [{ ...row(1), bounds: { ...bounds, x: 105 } }])
+    assert.equal(windows.get('motion/app/1').motion, undefined)
+    preview.hooks.onClient(agent, capture, async () => [])
+    preview.hooks.onVisual(agent, event(1))
+    assert.equal(windows.get('motion/app/1').motion, undefined, 'a new connection cannot use the old capture')
+  } finally { preview.close() }
+})
+
+test('early visual events resume on matching frames and failure clears the event target', async () => {
+  const listeners = new Map(), windows = new Map()
+  const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+  const view = { setDismissHandler() {}, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+  const preview = observeNative(ctx, view), agent = { id: 'early' }
+  const bounds = { x: 10, y: 20, width: 100, height: 80 }
+  const emit = (method, params, value, options = {}) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params }, callId: options.callId }, { isError: !!options.error, value })
+  const event = (sequence, phase, windowId = 2) => ({ type: 'visual', requestId: 'click-id', appHandle: 'app', windowId, process: { pid: 1, startedSeconds: 1, startedMicroseconds: 2 }, geometry: bounds, sequence, color: '#5EC0E8', phase, elapsedMs: 0, trajectory: phase === 'move' ? { samples: [{ t: 0, x: .1, y: .2, angle: 0 }, { t: .5, x: .8, y: .9, angle: .2 }], arrivalT: .4 } : { samples: [{ t: 0, x: .8, y: .9, angle: .2 }], arrivalT: 0 } })
+  try {
+    emit('getApp', {}, { appHandle: 'app', name: 'Editor' })
+    const rows = [1, 2].map(windowId => ({ windowId, title: `Window ${windowId}`, bounds, isOnScreen: true, onCurrentSpace: true }))
+    emit('getState', { appHandle: 'app', windowId: 1 }, { windowId: 1, windows: rows, snapshotId: 'snapshot' })
+    preview.hooks.onVisual(agent, event(1, 'move'))
+    await new Promise(resolve => setTimeout(resolve, 10))
+    preview.hooks.onVisual(agent, event(2, 'click'))
+    emit('screenshot', { appHandle: 'app', windowId: 2 }, { windowId: 2, data: 'YWJj', mimeType: 'image/png', bounds })
+    const motion = windows.get('early/app/2').motion
+    assert.equal(motion.phase, 'click')
+    assert.equal(motion.trajectory.samples.length, 2, 'click retains the move follow-through')
+    assert.ok(motion.elapsedMs >= 5, 'late frame resumes using elapsed local time')
+    assert.ok(motion.clickElapsedMs >= 0)
+    preview.hooks.onVisual(agent, { ...event(3, 'click'), phase: 'clear', requestId: 'older' })
+    assert.ok(windows.get('early/app/2').motion, 'an older clear cannot erase the current trajectory')
+    emit('click', { appHandle: 'app', snapshotId: 'snapshot' }, undefined, { callId: 'click-id', error: true })
+    assert.equal(windows.get('early/app/2').motion, undefined, 'failure clears the actual event target')
+  } finally { preview.close() }
+})
+
+test('a connection moving to another window clears its old cursor without affecting other agents', () => {
+  const listeners = new Map(), windows = new Map()
+  const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+  const view = { setDismissHandler() {}, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+  const preview = observeNative(ctx, view), first = { id: 'one' }, second = { id: 'two' }
+  const bounds = { x: 0, y: 0, width: 100, height: 100 }
+  const emit = (agent, method, params, value) => listeners.get('tools/result')({ signal: testSignal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
+  const event = (sequence, windowId) => ({ type: 'visual', requestId: 'r', appHandle: 'app', windowId, process: { pid: 1, startedSeconds: 1, startedMicroseconds: 0 }, geometry: bounds, sequence, color: '#5EC0E8', phase: 'position', elapsedMs: 0, trajectory: { samples: [{ t: 0, x: .5, y: .5, angle: 0 }], arrivalT: 0 } })
+  try {
+    for (const agent of [first, second]) {
+      emit(agent, 'getApp', {}, { appHandle: 'app', name: 'Editor' })
+      for (const windowId of [1, 2]) emit(agent, 'screenshot', { appHandle: 'app', windowId }, { windowId, data: 'YWJj', mimeType: 'image/png', bounds })
+      preview.hooks.onVisual(agent, event(1, 1))
+    }
+    preview.hooks.onVisual(first, event(2, 2))
+    assert.equal(windows.get('one/app/1').motion, undefined)
+    assert.ok(windows.get('one/app/2').motion)
+    assert.ok(windows.get('two/app/1').motion)
+  } finally { preview.close() }
 })

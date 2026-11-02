@@ -35,12 +35,12 @@ export function startNative(ctx: Context, config: provider.Config, hooks: Hooks)
   })
   ctx.inject(provider.inject, async scope => {
     try {
-      await provider.apply(scope, config, { ...hooks, onVolatile: listener => { scope.effect(() => ctx.on('loader/volatile-update', listener)) } })
+      await provider.apply(scope, config, hooks)
       reportStartupFailure()
       scope.effect(() => scope.systemPrompt.section({
         name: 'perse-cua:native-entry',
         order: scope.systemPrompt.getSectionOrder('TOOL_COMPUTER_USE'),
-        text: 'For macOS desktop interaction, use the registered cua tool and its application authorization flow. Do not use external cua-driver CLI or MCP tools. If a required capability is unavailable, explain the limitation. Do not switch providers to bypass denied or revoked access.',
+        text: 'For macOS desktop interaction, use the registered cua tool. Do not use external cua-driver CLI or MCP tools. If a required capability is unavailable, explain the limitation. Do not switch providers to bypass denied or revoked access.',
       }))
     }
     catch (error) { reportStartupFailure('NATIVE_START_FAILED'); console.error('[perse-cua] Native provider failed to start:', error); throw error }
