@@ -26,7 +26,9 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
   const pendingTurns = new Set<string>()
   const activeTurns = new Set<string>()
   const permissionBlocked = new Set<string>()
-  const turnSignals = new Map<string, { signal: AbortSignal; stop: () => void }>()
+  const toolSignals = new Map<object, { id: string; signal: AbortSignal; stop: () => void; settled: boolean }>()
+  const turnVersions = new Map<string, object>()
+  const executionVersions = new WeakMap<object, object>()
   const dismissed = new Set<string>()
   const automatic = new Set<string>()
   const appearances = new Map<string, number>()
@@ -39,6 +41,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
   let captureOrder = 0
   const captured = new Map<string, number>()
   const intervalMs = options.intervalMs ?? 3000
+  let refreshDelay = intervalMs
   const captures = new Map<string, AbortController>()
   const pointTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const clearPoint = (id: string): void => { const timer = pointTimers.get(id); if (timer) clearTimeout(timer); pointTimers.delete(id) }
@@ -80,7 +83,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
       refreshTimer = undefined
       return
     }
-    if (!background && !refreshTimer) refreshTimer = setTimeout(refresh, intervalMs)
+    if (!background && !refreshTimer) refreshTimer = setTimeout(refresh, refreshDelay)
   }
   const refresh = async (): Promise<void> => {
     refreshTimer = undefined
@@ -185,6 +188,7 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
         }
       }
       const eligible = candidates.filter(candidate => candidate.valid())
+      refreshDelay = eligible.length ? Math.max(Math.min(250, intervalMs), intervalMs / eligible.length) : intervalMs
       if (!eligible.length) return
       const target = eligible.reduce((oldest, candidate) => (captured.get(candidate.id) ?? 0) < (captured.get(oldest.id) ?? 0) ? candidate : oldest)
       captured.set(target.id, ++captureOrder)
@@ -236,17 +240,20 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
     if (count > 0) watchers.set(sessionId, count); else watchers.delete(sessionId)
     schedule(!active && count <= 0, sessionId)
   })
-  const detachTurnSignal = (id: string): void => {
-    const previous = turnSignals.get(id)
-    if (previous) previous.signal.removeEventListener('abort', previous.stop)
-    turnSignals.delete(id)
+  const detachToolSignal = (exec: object): void => {
+    const entry = toolSignals.get(exec)
+    if (entry) entry.signal.removeEventListener('abort', entry.stop)
+    toolSignals.delete(exec)
   }
-  const finishTurn = (id: string, status: NonNullable<PreviewWindow['activity']>): void => {
-    if (!activeTurns.delete(id)) { detachTurnSignal(id); return }
-    paused.set(id, status)
-    detachTurnSignal(id)
+  const stopCaptures = (id: string): void => {
     schedule(true, id)
     for (const [windowId, controller] of captures) if (windowId.startsWith(`${encodeURIComponent(id)}/`)) { controller.abort(); captures.delete(windowId) }
+  }
+  const finishTurn = (id: string, status: NonNullable<PreviewWindow['activity']>): void => {
+    if (!activeTurns.delete(id)) return
+    paused.set(id, status)
+    stopCaptures(id)
+    for (const [windowId, entry] of toolSignals) if (entry.id === id) detachToolSignal(windowId)
     for (const [agent, apps] of owners) if (agent.id === id) for (const app of apps.values()) for (const [windowId, item] of app.windows) {
       clearPoint(item.id)
       const { point: _point, ...rest } = item
@@ -255,25 +262,33 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
   }
   const stopTurns = ctx.on('session/event', (session, event) => {
     const id = session.id
-    if (event.type === 'turn/start') { pendingTurns.add(id); return }
+    if (event.type === 'turn/start') { pendingTurns.add(id); turnVersions.set(id, {}); return }
     if (event.type !== 'turn/end') return
     pendingTurns.delete(id)
     finishTurn(id, event.data.reason.kind === 'completed' ? 'completed' : event.data.reason.kind === 'aborted' ? 'stopped' : 'failed')
+    turnVersions.delete(id)
   })
-  const listenTurnSignal = ctx.on as unknown as (event: string, listener: (id: string, signal: AbortSignal) => void) => () => void
-  const stopTurnSignals = listenTurnSignal.call(ctx, 'agent-loop/turn-signal', (id, signal) => {
-    detachTurnSignal(id)
-    const onAbort = (): void => {
-      pendingTurns.delete(id)
-      if (!activeTurns.has(id)) paused.set(id, 'stopped')
-      finishTurn(id, 'stopped')
+  const stopToolSignals = ctx.on('tools/pre-execute', (exec, next) => {
+    if (exec.name === 'cua' && exec.agent && !disposed.has(exec.agent) && !closed) {
+      const id = exec.agent.id
+      for (const [prior, entry] of toolSignals) if (entry.id === id && entry.settled) detachToolSignal(prior)
+      const version = turnVersions.get(id)
+      if (version) { executionVersions.set(exec, version); activeTurns.add(id) }
+      // Cancellation can be local to this tool call; turn/end owns the final activity.
+      const onAbort = (): void => { paused.set(id, 'stopped'); stopCaptures(id) }
+      toolSignals.set(exec, { id, signal: exec.signal, stop: onAbort, settled: false })
+      exec.signal.addEventListener('abort', onAbort, { once: true })
+      if (exec.signal.aborted) onAbort()
+      else if (activeTurns.has(id) && !pendingTurns.has(id)) { paused.delete(id); schedule() }
     }
-    turnSignals.set(id, { signal, stop: onAbort })
-    signal.addEventListener('abort', onAbort, { once: true })
-    if (signal.aborted) onAbort()
+    return next()
   })
   const stop = ctx.on('tools/result', (exec, result) => {
     if (exec.name !== 'cua' || !exec.agent || disposed.has(exec.agent)) return
+    const signalEntry = toolSignals.get(exec)
+    if (signalEntry) signalEntry.settled = true
+    const version = executionVersions.get(exec)
+    if (exec.signal.aborted || (version && version !== turnVersions.get(exec.agent.id))) return
     const request = record(exec.arguments)
     let rawParams = request?.params
     if (typeof rawParams === 'string') { try { rawParams = JSON.parse(rawParams) } catch { return } }
@@ -429,7 +444,8 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
   })
   const stopAgent = ctx.on('agent/disposed', ({ agent }) => {
     disposed.add(agent)
-    detachTurnSignal(agent.id); activeTurns.delete(agent.id); pendingTurns.delete(agent.id); paused.delete(agent.id); permissionBlocked.delete(agent.id)
+    for (const [exec, entry] of toolSignals) if (entry.id === agent.id) detachToolSignal(exec)
+    turnVersions.delete(agent.id); activeTurns.delete(agent.id); pendingTurns.delete(agent.id); paused.delete(agent.id); permissionBlocked.delete(agent.id)
     for (const id of captured.keys()) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) captured.delete(id)
     clients.delete(agent); lists.delete(agent); for (const id of dismissed) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { dismissed.delete(id); automatic.delete(id); appearances.delete(id); missing.delete(id) }; for (const id of automatic) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { automatic.delete(id); missing.delete(id) }; for (const id of appearances.keys()) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) appearances.delete(id); schedule(true, agent.id)
     for (const [id, controller] of captures) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { controller.abort(); captures.delete(id) }
@@ -444,6 +460,8 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
       onConnectionFailure: recordConnectionFailure,
       onClient: (agent, capture, list) => { if (!closed && !disposed.has(agent)) { clients.set(agent, capture); if (list) lists.set(agent, list) } },
       onRevoke: (agent) => {
+        if (turnVersions.has(agent.id)) turnVersions.set(agent.id, {})
+        for (const [exec, entry] of toolSignals) if (entry.id === agent.id) detachToolSignal(exec)
         const apps = owners.get(agent)
         if (!apps) return
         for (const [handle, app] of apps) { const statusId = `${encodeURIComponent(agent.id)}/${encodeURIComponent(handle)}/status`; unsupported.delete(statusId); discoveryStatus.delete(statusId); view.remove(statusId); for (const item of app.windows.values()) {
@@ -454,6 +472,6 @@ export function observeNative(ctx: Context, view: PreviewService, options: { int
         clients.delete(agent); lists.delete(agent); for (const id of dismissed) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { dismissed.delete(id); automatic.delete(id); appearances.delete(id); missing.delete(id) }; for (const id of automatic) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) { automatic.delete(id); missing.delete(id) }; for (const id of appearances.keys()) if (id.startsWith(`${encodeURIComponent(agent.id)}/`)) appearances.delete(id); schedule(true, agent.id)
       },
     },
-    close: () => { closed = true; if (refreshTimer) clearTimeout(refreshTimer); background?.abort(); watchers.clear(); watcherVersions.clear(); paused.clear(); pendingTurns.clear(); activeTurns.clear(); permissionBlocked.clear(); for (const id of turnSignals.keys()) detachTurnSignal(id); captured.clear(); lists.clear(); dismissed.clear(); automatic.clear(); appearances.clear(); missing.clear(); unsupported.clear(); discoveryStatus.clear(); stop(); stopAgent(); stopTurns(); stopTurnSignals(); for (const controller of captures.values()) controller.abort(); captures.clear(); for (const id of pointTimers.keys()) clearPoint(id); clients.clear(); owners.clear() },
+    close: () => { closed = true; if (refreshTimer) clearTimeout(refreshTimer); background?.abort(); watchers.clear(); watcherVersions.clear(); paused.clear(); pendingTurns.clear(); activeTurns.clear(); permissionBlocked.clear(); for (const exec of toolSignals.keys()) detachToolSignal(exec); turnVersions.clear(); captured.clear(); lists.clear(); dismissed.clear(); automatic.clear(); appearances.clear(); missing.clear(); unsupported.clear(); discoveryStatus.clear(); stop(); stopAgent(); stopTurns(); stopToolSignals(); for (const controller of captures.values()) controller.abort(); captures.clear(); for (const id of pointTimers.keys()) clearPoint(id); clients.clear(); owners.clear() },
   }
 }

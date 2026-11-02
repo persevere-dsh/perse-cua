@@ -40,9 +40,13 @@ test('macOS rejects MCP backend and driver settings before starting a provider',
   assert.throws(() => Main.apply(ctx, { backend: 'native', helperPath: '/nonexistent/perse-cua-helper' }), /unavailable or not executable/)
   ctx.provide('profileContext', {})
   assert.throws(() => Main.apply(ctx, { presenterOnly: true }), /use the perse-cua\/presenter entrypoint/)
-  assert.throws(() => Main.apply(ctx, {}), /requires DSH profile tool admission version 1/)
-  ctx.provide('profileToolAdmission', { version: 0 })
-  assert.throws(() => Main.apply(ctx, {}), /requires DSH profile tool admission version 1/)
+  const withoutAdmission = new Context()
+  withoutAdmission.provide('profileContext', {})
+  assert.throws(() => Main.apply(withoutAdmission, { helperPath: '/nonexistent/perse-cua-helper' }), /unavailable or not executable/)
+  const partialAdmission = new Context()
+  partialAdmission.provide('profileContext', {})
+  partialAdmission.provide('profileToolAdmission', { version: 0, reportStartupFailure: true })
+  assert.throws(() => Main.apply(partialAdmission, { helperPath: '/nonexistent/perse-cua-helper' }), /unavailable or not executable/)
 })
 
 test('missing native helper reports startup failure to the profile owner', { skip: process.platform !== 'darwin' }, () => {
@@ -98,6 +102,7 @@ test('a provider that wins while dependencies load produces an explicit startup 
 test('macOS native loader entry stops on disable', { skip: process.platform !== 'darwin' }, async () => {
   const ctx = await host()
   try {
+    ctx.provide('profileContext', {})
     await ctx.loader.create({ id: 'perse-cua', name: 'cordis:perse', config: {} })
     await ctx.loader.await()
     await waitFor(() => ctx.computerUse?.providerName === 'dsh-cua' && ctx.tools.get('cua'))

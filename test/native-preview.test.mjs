@@ -96,12 +96,15 @@ test('turn cancellation stops an in-flight preview before the turn closes', asyn
   }))
   const emit = (method, params, value) => listeners.get('tools/result')({ signal: turn.signal, name: 'cua', agent, arguments: { method, params } }, { isError: false, value })
   listeners.get('session/event')({ id: 'a' }, { type: 'turn/start', data: { turn: 1 } })
-  listeners.get('agent-loop/turn-signal')('a', turn.signal)
+  const exec = { signal: turn.signal, name: 'cua', agent, arguments: { method: 'getApp', params: {} } }
+  await listeners.get('tools/pre-execute')(exec, async () => ({ kind: 'allow' }))
   emit('getApp', {}, { appHandle: 'app', name: 'Editor' })
   emit('getState', { appHandle: 'app', windowId: 1 }, { windowId: 1, windows: [{ windowId: 1, isOnScreen: true }] })
   turn.abort()
   assert.equal(pending[0].signal.aborted, true)
-  assert.equal(windows.get('a/app/1').activity, 'stopped')
+  assert.equal(windows.get('a/app/1').activity, undefined)
+  listeners.get('session/event')({ id: 'a' }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'failed' } } })
+  assert.equal(windows.get('a/app/1').activity, 'failed')
   preview.close()
 })
 
@@ -113,7 +116,8 @@ test('a tool result arriving after an early turn cancellation cannot start previ
   let captures = 0
   preview.hooks.onClient(agent, async () => { captures++; return 'data:image/png;base64,AAAA' })
   listeners.get('session/event')({ id: 'a' }, { type: 'turn/start', data: { turn: 1 } })
-  listeners.get('agent-loop/turn-signal')('a', turn.signal)
+  const exec = { signal: turn.signal, name: 'cua', agent, arguments: { method: 'getApp', params: {} } }
+  assert.deepEqual(await listeners.get('tools/pre-execute')(exec, async () => ({ kind: 'allow' })), { kind: 'allow' })
   turn.abort()
   listeners.get('tools/result')({ signal: turn.signal, name: 'cua', agent, arguments: { method: 'getApp', params: {} } }, { isError: false, value: { appHandle: 'app', name: 'Editor' } })
   listeners.get('tools/result')({ signal: turn.signal, name: 'cua', agent, arguments: { method: 'getState', params: { appHandle: 'app', windowId: 1 } } }, { isError: false, value: { windowId: 1 } })
@@ -1173,4 +1177,36 @@ test('background window disappearance clears pending click frames while retainin
   assert.ok(items.some(item => item.id.endsWith('/2')))
   assert.ok(items.every(item => item.point === undefined && item.image))
   controller.abort(); await reader.return(); preview.close(); view.close()
+})
+
+test('tool-local cancellation permits a later call in the same turn and old turn results stay ignored', async () => {
+  const listeners = new Map(), windows = new Map()
+  const ctx = { on(name, fn) { listeners.set(name, fn); return () => listeners.delete(name) } }
+  const view = { setDismissHandler() {}, put(item) { windows.set(item.id, item) }, remove(id) { windows.delete(id) } }
+  const preview = observeNative(ctx, view), agent = { id: 'a' }, session = { id: 'a' }
+  const event = (type, data) => listeners.get('session/event')(session, { type, data })
+  const prepare = async (method, params, signal) => {
+    const exec = { name: 'cua', agent, signal, arguments: { method, params } }
+    await listeners.get('tools/pre-execute')(exec, async () => ({ kind: 'allow' }))
+    return exec
+  }
+  const result = (exec, value) => listeners.get('tools/result')(exec, { isError: false, value })
+  event('turn/start', { turn: 1 })
+  const cancelled = new AbortController()
+  const first = await prepare('getApp', {}, cancelled.signal)
+  cancelled.abort()
+  result(first, { appHandle: 'stale', name: 'Stale' })
+  const second = await prepare('getApp', {}, testSignal)
+  result(second, { appHandle: 'app', name: 'Editor' })
+  const state = await prepare('getState', { appHandle: 'app', windowId: 1 }, testSignal)
+  result(state, { windowId: 1 })
+  assert.equal(windows.get('a/app/1').title, 'Editor')
+  const late = await prepare('getApp', {}, testSignal)
+  event('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  event('turn/start', { turn: 2 })
+  result(late, { appHandle: 'late', name: 'Late' })
+  const lateState = await prepare('getState', { appHandle: 'late', windowId: 2 }, testSignal)
+  result(lateState, { windowId: 2 })
+  assert.equal(windows.has('a/late/2'), false)
+  preview.close()
 })
