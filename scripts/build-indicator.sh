@@ -1,7 +1,36 @@
 #!/usr/bin/env bash
 # Build the menu-bar indicator into packages/perse-cua/bin/PerseCuaIndicator.app
 # Requires the Xcode command line tools (swiftc). Run from the repo root.
+# Local builds sign ad-hoc. A release build passes --sign-identity so the app carries a
+# Developer ID with a secure timestamp and the hardened runtime, which Apple requires for
+# code nested inside a notarized installer.
 set -euo pipefail
+sign_identity='-'
+require_developer_id=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --sign-identity)
+      if [[ $# -lt 2 || "$2" == --* ]]; then
+        echo 'Missing value for --sign-identity' >&2
+        exit 1
+      fi
+      sign_identity="$2"
+      shift 2
+      ;;
+    --require-developer-id)
+      require_developer_id=true
+      shift
+      ;;
+    *)
+      echo "Unsupported argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+if [[ "$require_developer_id" == true && "$sign_identity" == '-' ]]; then
+  echo 'Developer ID verification requires an explicit signing identity' >&2
+  exit 1
+fi
 root="$(cd "$(dirname "$0")/.." && pwd)"
 out="$root/packages/perse-cua/bin/PerseCuaIndicator.app"
 tmp="$(mktemp -d)"
@@ -35,8 +64,21 @@ cat > "$staged/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>13.0</string>
 </dict></plist>
 PLIST
-codesign --force --sign - "$staged"
+sign_args=(--force --sign "$sign_identity")
+if [[ "$sign_identity" != '-' ]]; then
+  sign_args+=(--timestamp --options runtime)
+fi
+codesign "${sign_args[@]}" "$staged"
 codesign --verify --deep --strict "$staged"
+if [[ "$require_developer_id" == true ]]; then
+  # Read the whole report before matching: `grep -q` would close the pipe and make
+  # codesign fail under pipefail, reporting a valid Developer ID as missing.
+  signature="$(codesign --display --verbose=4 "$staged" 2>&1)"
+  if [[ "$signature" != *"Authority=Developer ID Application:"* ]]; then
+    echo 'Indicator is not signed with a Developer ID Application certificate' >&2
+    exit 1
+  fi
+fi
 # Sign outside synchronized workspaces, whose Finder metadata can invalidate verification.
 # The archive is verified again after extraction before delivery.
 rm -rf "$out"
